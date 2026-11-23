@@ -1,0 +1,106 @@
+<!--
+SPDX-FileCopyrightText: 2026 Joaquim Serra
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640"
+     role="img" aria-labelledby="t d">
+  <title id="t">DOSCAD.DRV</title>
+  <desc id="d">Variable resolution VESA display driver for the 1993 DOS OrCAD 386+ suite in
+    DOSBox-X, from 640x480 up to 4096x2160. Written by Claude Opus 5.5, fully vibe coded.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#1a2150" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1236"/>
+      <stop offset="1" stop-color="#070a1f"/>
+    </linearGradient>
+  </defs>
+  <style>
+    text { font-family: "DejaVu Sans Mono", Consolas, Menlo, "Liberation Mono", monospace; }
+    .title { font-size: 80px; font-weight: bold; fill: #ffff55; letter-spacing: 2px; }
+    .shadow { font-size: 80px; font-weight: bold; fill: #aa5500; letter-spacing: 2px; }
+    .sub { font-size: 30px; fill: #ffffff; }
+    .sub2 { font-size: 22px; fill: #55ffff; }
+    .feat { font-size: 21px; fill: #e6e9f5; }
+    .mark { font-size: 21px; fill: #55ff55; }
+    .badge { font-size: 21px; font-weight: bold; fill: #0d1236; }
+    .badge2 { font-size: 19px; fill: #e6e9f5; }
+    .res { font-size: 15px; fill: #e6e9f5; }
+    .cap { font-size: 15px; fill: #8a93bd; }
+    .fine { font-size: 12.5px; fill: #7d86ad; }
+  </style>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+
+  <!-- The 16 colours the driver keeps from the original VGA drivers. -->
+  <g>
+    <rect x="0" y="0" width="80" height="10" fill="#000000"/>
+    <rect x="80" y="0" width="80" height="10" fill="#0000aa"/>
+    <rect x="160" y="0" width="80" height="10" fill="#00aa00"/>
+    <rect x="240" y="0" width="80" height="10" fill="#00aaaa"/>
+    <rect x="320" y="0" width="80" height="10" fill="#aa0000"/>
+    <rect x="400" y="0" width="80" height="10" fill="#aa00aa"/>
+    <rect x="480" y="0" width="80" height="10" fill="#aa5500"/>
+    <rect x="560" y="0" width="80" height="10" fill="#aaaaaa"/>
+    <rect x="640" y="0" width="80" height="10" fill="#555555"/>
+    <rect x="720" y="0" width="80" height="10" fill="#5555ff"/>
+    <rect x="800" y="0" width="80" height="10" fill="#55ff55"/>
+    <rect x="880" y="0" width="80" height="10" fill="#55ffff"/>
+    <rect x="960" y="0" width="80" height="10" fill="#ff5555"/>
+    <rect x="1040" y="0" width="80" height="10" fill="#ff55ff"/>
+    <rect x="1120" y="0" width="80" height="10" fill="#ffff55"/>
+    <rect x="1200" y="0" width="80" height="10" fill="#ffffff"/>
+  </g>
+
+  <!-- Title -->
+  <text class="shadow" x="64" y="124">DOSCAD.DRV</text>
+  <text class="title" x="60" y="120">DOSCAD.DRV</text>
+  <text class="sub" x="62" y="172">Variable resolution VESA display driver</text>
+  <text class="sub2" x="62" y="208">for the 1993 DOS OrCAD 386+ suite, in DOSBox-X</text>
+
+  <!-- What it does -->
+  <g>
+    <text class="mark" x="62" y="272">&#9656;</text>
+    <text class="feat" x="92" y="272">Any VESA 256-colour mode, 640×480 to 4096×2160</text>
+    <text class="mark" x="62" y="310">&#9656;</text>
+    <text class="feat" x="92" y="310">Pixel-identical to VGA640.DRV and VESA800.DRV</text>
+    <text class="mark" x="62" y="348">&#9656;</text>
+    <text class="feat" x="92" y="348">Integer scale and Scale2x/3x font: sharp at 4K</text>
+    <text class="mark" x="62" y="386">&#9656;</text>
+    <text class="feat" x="92" y="386">PCB386+, DRAFT (SDT386+) and the ESP shell</text>
+    <text class="mark" x="62" y="424">&#9656;</text>
+    <text class="feat" x="92" y="424">30 KB self-unpacking driver: nasm + gcc -m16</text>
+  </g>
+
+  <!-- Resolutions, to scale (4096 px = 400 px), anchored bottom left. -->
+  <g transform="translate(820 252)">
+    <text class="cap" x="0" y="-12">same drawing, every resolution (to scale)</text>
+    <rect x="0" y="0" width="400" height="211" fill="#5555ff" fill-opacity="0.10"
+          stroke="#5555ff" stroke-width="2"/>
+    <text class="res" x="10" y="22">4096×2160</text>
+    <rect x="0" y="105.5" width="187.5" height="105.5" fill="#55ffff" fill-opacity="0.10"
+          stroke="#55ffff" stroke-width="2"/>
+    <text class="res" x="10" y="127">1920×1080</text>
+    <rect x="0" y="152.4" width="78.1" height="58.6" fill="#55ff55" fill-opacity="0.12"
+          stroke="#55ff55" stroke-width="2"/>
+    <rect x="0" y="164.1" width="62.5" height="46.9" fill="#ffff55" fill-opacity="0.12"
+          stroke="#ffff55" stroke-width="2"/>
+    <path d="M78 160H230" stroke="#55ff55" stroke-width="1" stroke-dasharray="3 3"/>
+    <text class="res" x="238" y="165">800×600</text>
+    <path d="M62 188H230" stroke="#ffff55" stroke-width="1" stroke-dasharray="3 3"/>
+    <text class="res" x="238" y="193">640×480</text>
+  </g>
+
+  <!-- Authorship -->
+  <rect x="60" y="470" width="366" height="42" rx="6" fill="#ffff55"/>
+  <text class="badge" x="78" y="498">Written by Claude Opus 5.5</text>
+  <text class="badge2" x="448" y="498">100% vibe coded · GPL-2.0-or-later</text>
+
+  <!-- Disclaimer -->
+  <path d="M60 548H1220" stroke="#1f2758" stroke-width="1"/>
+  <text class="fine" x="60" y="572">Independent, unofficial project: not affiliated with, endorsed or supported by Cadence Design Systems, Inc. OrCAD is a registered</text>
+  <text class="fine" x="60" y="591">trademark of Cadence Design Systems, Inc.; VESA is a trademark of the Video Electronics Standards Association. Contains no OrCAD</text>
+  <text class="fine" x="60" y="610">software, code, fonts or data: the font is read at run time from your own licensed copy. Provided as is, without any warranty.</text>
+</svg>

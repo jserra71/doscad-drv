@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Joaquim Serra
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Build output of build.sh (the finished driver and its intermediate files).
+/DOSCAD.DRV
+/build/
+# Release packages and their checksums: published by hand, not kept in git.
+/*.zip
+/*.zip.*
+# Python byte code of the test scripts.
+__pycache__/
