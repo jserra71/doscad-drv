@@ -9,6 +9,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 *Developed by Claude Opus 5.5 in high effort mode.*
 
+## Download
+
+**[Download the latest package from the Releases page](https://github.com/jserra71/doscad-drv/releases/latest)**:
+`doscad.drv.<version>.zip`, with the ready-to-use `DOSCAD.DRV`, the sources and this
+document, and `doscad.drv.<version>.zip.sha256` to check it
+(`sha256sum -c doscad.drv.<version>.zip.sha256`).
+
+GitHub's green **Code → Download ZIP** button and the *Source code* archives of each
+release hold the sources only, without `DOSCAD.DRV`: use them only to build the driver
+yourself (section 6).
+
 > **Disclaimer.** This is an independent, unofficial project. It is not affiliated with,
 > endorsed, sponsored or supported by Cadence Design Systems, Inc., the former OrCAD, Inc.,
 > or any other company named here.
@@ -36,7 +47,7 @@ integer scale and smooths the font (Scale2x / Scale3x), so the text stays readab
 
 At 640×480 and 800×600 the picture is pixel-identical to `VGA640.DRV` and `VESA800.DRV`.
 
-Package version: **1.2.2**; driver version: **1.2.0** (see the changelog at the end). The
+Package version: **1.2.3**; driver version: **1.2.0** (see the changelog at the end). The
 start screen of PCB386 shows
 `Variable resolution advanced VESA driver  v1.2.0  1920x1080 256 colours` with the mode that
 was actually set.
@@ -64,9 +75,10 @@ when it loads, which some antivirus programs report as suspicious; the sources a
 
 ## 1. Install
 
-1. Copy `DOSCAD.DRV` into the OrCAD driver directory, next to `VGA640.DRV`. With the
-   folders of section 2 (`~/orcad` mounted as `C:`) that is `~/orcad/orcadesp/drv/`,
-   `C:\ORCADESP\DRV\DOSCAD.DRV` inside DOSBox-X.
+1. Unzip the package (see Download at the top) and copy `DOSCAD.DRV` into the OrCAD
+   driver directory, next to `VGA640.DRV`. With the folders of section 2 (`~/orcad`
+   mounted as `C:`) that is `~/orcad/orcadesp/drv/`, `C:\ORCADESP\DRV\DOSCAD.DRV` inside
+   DOSBox-X.
    `VGA640.DRV` must stay there: the 8×8 font belongs to OrCAD, so it is not in this
    package, and the driver reads it from `VGA640.DRV` when PCB386 starts (see
    `DOSCADFONT` in section 3 for another place).
@@ -351,6 +363,13 @@ built with `-Os` to fit the 64 KB image.
 
 The version follows semantic versioning: major for a change that needs a new
 configuration, minor for a new feature, patch for a fix.
+
+### 1.2.3 — 2026-11-23
+
+Documentation only; `DOSCAD.DRV` is unchanged and still reports v1.2.0.
+
+- Download section at the top: the package is on the Releases page; GitHub's *Download
+  ZIP* and *Source code* archives have no `DOSCAD.DRV`.
 
 ### 1.2.2 — 2026-11-23
 
