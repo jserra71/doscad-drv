@@ -81,6 +81,13 @@ static i64 sdiv64(i64 n, i64 d)
     u64 un = (u64)n;
     u64 ud = (u64)d;
     u64 q;
+    // Both in 32 bits with a positive divisor (nearly every call): one idiv,
+    // which truncates toward zero as well.
+    i32 n32 = (i32)n;
+    i32 d32 = (i32)d;
+    if (n == n32 && d == d32 && d32 > 0) {
+        return n32 / d32;
+    }
     if (n < 0) {
         un = -(u64)n;
         negative ^= 1;
@@ -240,7 +247,7 @@ enum { WRITE_REPLACE = 0, WRITE_OR = 1, WRITE_XOR = 2 };
 #define MAX_SCALE 4
 #define ROW_BUFFER 4096
 /// Version of DOSCAD.DRV (semver); build.sh prints it.
-#define DOSCAD_VERSION "1.2.0"
+#define DOSCAD_VERSION "1.3.0"
 
 static const u8 COLOUR_TO_VGA[16] = {0, 1, 2, 3, 4, 5, 6, 8, 7, 9, 10, 11, 12, 13, 14, 15};
 static const u8 DASH[4] = {1, 1, 0, 0};
@@ -340,43 +347,64 @@ static u8 written_value(u8 old, u8 col, u8 mode)
 static void write_pixel(i32 x, i32 y, u8 col, u8 mode)
 {
     u32 off = (u32)y * (u32)pitch + (u32)x;
+    set_bank((int)(off >> 16));
+    volatile u8 __seg_gs *p = (volatile u8 __seg_gs *)(u32)(u16)off;
     if (mode == WRITE_REPLACE) {
-        vram_write(off, col);
+        *p = col;
         return;
     }
-    vram_write(off, written_value(vram_read(off), col, mode));
+    *p = written_value(*p, col, mode);
 }
 
 /// Writes span bytes from offset start of the current bank.
 /// The aligned middle goes in 32-bit accesses: each VRAM access of the
 /// emulator costs the same for a byte or a dword, so a long span is about
-/// four times faster.
+/// four times faster. One string or read-modify-write loop per write mode,
+/// with the mode tested once per span instead of once per access.
 static void fill_bank_span(u16 start, u32 span, u8 col, u8 mode)
 {
-    volatile u8 __seg_gs *p = (volatile u8 __seg_gs *)(u32)start;
-    u32 i = 0;
-    // leading bytes up to a 4-byte boundary
-    while (i < span && ((start + i) & 3) != 0) {
-        p[i] = written_value(p[i], col, mode);
-        i++;
-    }
     u32 wide = (u32)col * 0x01010101u;
-    volatile u32 __seg_gs *q = (volatile u32 __seg_gs *)(u32)(u16)(start + i);
-    u32 words = (span - i) / 4;
-    for (u32 w = 0; w < words; w++) {
-        if (mode == WRITE_REPLACE) {
-            q[w] = wide;
-        } else if (mode == WRITE_XOR) {
-            q[w] = q[w] ^ wide;
-        } else {
-            q[w] = q[w] | wide;
-        }
+    // leading bytes up to a 4-byte boundary, then dwords, then the last bytes
+    u32 head = (u32)(-start & 3);
+    if (head > span) {
+        head = span;
     }
-    i += words * 4;
-    // trailing bytes
-    while (i < span) {
-        p[i] = written_value(p[i], col, mode);
-        i++;
+    u32 words = (span - head) / 4;
+    u32 tail = span - head - words * 4;
+    u16 di = start;
+    if (mode == WRITE_REPLACE) {
+        __asm__ volatile("pushw %%es\n\tpushw %%gs\n\tpopw %%es\n\tcld\n\t"
+                         "mov %2, %%ecx\n\trep stosb\n\t"
+                         "mov %3, %%ecx\n\trep stosl\n\t"
+                         "mov %4, %%ecx\n\trep stosb\n\tpopw %%es"
+                         : "+D"(di)
+                         : "a"(wide), "r"(head), "r"(words), "r"(tail)
+                         : "ecx", "memory", "cc");
+        return;
+    }
+    volatile u8 __seg_gs *p = (volatile u8 __seg_gs *)(u32)start;
+    volatile u32 __seg_gs *q = (volatile u32 __seg_gs *)(u32)(u16)(start + head);
+    volatile u8 __seg_gs *r = (volatile u8 __seg_gs *)(u32)(u16)(start + head + words * 4);
+    if (mode == WRITE_XOR) {
+        for (u32 i = 0; i < head; i++) {
+            p[i] ^= col;
+        }
+        for (u32 w = 0; w < words; w++) {
+            q[w] ^= wide;
+        }
+        for (u32 i = 0; i < tail; i++) {
+            r[i] ^= col;
+        }
+        return;
+    }
+    for (u32 i = 0; i < head; i++) {
+        p[i] |= col;
+    }
+    for (u32 w = 0; w < words; w++) {
+        q[w] |= wide;
+    }
+    for (u32 i = 0; i < tail; i++) {
+        r[i] |= col;
     }
 }
 
@@ -1381,20 +1409,39 @@ struct circle
     i32 k, y, decision, inc_x, inc_y;
     i64 pixel[2];
     i64 board[2];
+    // Offsets from the centre whose board point lies inside the window, per axis:
+    // lo..hi (the window test of each point without 64-bit multiplications), and
+    // the physical clip. Set by circle_bounds(), which every user must call.
+    i64 lo[2];
+    i64 hi[2];
+    i32 clip[4];
 };
 
+/// Is c->board[axis] + offset steps before the window (which < 0), after it
+/// (which > 0) or inside it (which == 0)? The bounds come from circle_bounds().
 static int circle_axis_test(const struct circle *c, int axis, i32 offset, int which)
 {
-    i64 point = c->board[axis] * halves + (i64)offset * 2 * zoom;
-    i64 first = (i64)window[axis] * halves;
-    i64 last = (i64)window[axis + 2] * halves;
     if (which < 0) {
-        return point < first;
+        return offset < c->lo[axis];
     }
     if (which > 0) {
-        return point > last;
+        return offset > c->hi[axis];
     }
-    return point >= first && point <= last;
+    return offset >= c->lo[axis] && offset <= c->hi[axis];
+}
+
+/// The board point of an offset is board * halves + offset * 2 * zoom; it is inside
+/// the window, window[axis] * halves ..= window[axis + 2] * halves, exactly for
+/// offsets from ceil((window[axis] - board) * halves / (2 * zoom)) to
+/// floor((window[axis + 2] - board) * halves / (2 * zoom)).
+static void circle_bounds(struct circle *c)
+{
+    i64 d = 2 * (i64)zoom;
+    for (int axis = 0; axis < 2; axis++) {
+        c->lo[axis] = -div_floor(((i64)c->board[axis] - window[axis]) * halves, d);
+        c->hi[axis] = div_floor(((i64)window[axis + 2] - c->board[axis]) * halves, d);
+    }
+    physical_clip_rectangle(c->clip);
 }
 
 static int circle_advance(struct circle *c)
@@ -1419,8 +1466,7 @@ static void circle_span(const struct circle *c, i32 row_offset, i32 half)
     if (circle_axis_test(c, 0, -half, 1) || circle_axis_test(c, 0, half, -1) || !circle_axis_test(c, 1, row_offset, 0)) {
         return;
     }
-    i32 pc[4];
-    physical_clip_rectangle(pc);
+    const i32 *pc = c->clip;
     i32 row = (i32)c->pixel[1] + row_offset;
     if (row < pc[1] || row > pc[3]) {
         return;
@@ -1439,9 +1485,7 @@ static void circle_point(const struct circle *c, i32 ox, i32 oy)
     if (!circle_axis_test(c, 0, ox, 0) || !circle_axis_test(c, 1, oy, 0)) {
         return;
     }
-    i32 pc[4];
-    physical_clip_rectangle(pc);
-    plot_physical(pc, (i32)c->pixel[0] + ox, (i32)c->pixel[1] + oy, colour, write_mode);
+    plot_physical(c->clip, (i32)c->pixel[0] + ox, (i32)c->pixel[1] + oy, colour, write_mode);
 }
 
 static void circle_eight(const struct circle *c)
@@ -1469,6 +1513,7 @@ static void draw_circle(i32 x, i32 y, i32 radius, i32 mode)
     c.pixel[1] = div_floor(((i64)y - window[1] + (i64)origin[1] * zoom) * halves + zoom, 2 * (i64)zoom);
     c.board[0] = x;
     c.board[1] = y;
+    circle_bounds(&c);
     c.k = 0;
     c.y = (i32)steps;
     c.decision = 1 - (i32)steps;
@@ -1494,10 +1539,11 @@ static void draw_circle(i32 x, i32 y, i32 radius, i32 mode)
             circle_span(&c, -c.k, c.y);
             circle_span(&c, c.k, c.y);
         }
-        struct circle before = c;
+        i32 before_k = c.k;
+        i32 before_y = c.y;
         if (circle_advance(&c)) {
-            circle_span(&c, -before.y, before.k);
-            circle_span(&c, before.y, before.k);
+            circle_span(&c, -before_y, before_k);
+            circle_span(&c, before_y, before_k);
         }
         if (c.k >= c.y) {
             break;
@@ -1534,6 +1580,21 @@ static void physical_space(struct space *s)
 
 static void space_line(const struct space *s, i32 x1, i32 y1, i32 x2, i32 y2, int dashed)
 {
+    // A solid horizontal line (every row of a filled shape): the clipping of
+    // draw_solid_segment() for that case, straight to the run.
+    if (!dashed && y1 == y2) {
+        const i32 *c = s->clip;
+        if (y1 < c[1] || y1 > c[3]) {
+            return;
+        }
+        i32 left = imin(x1, x2);
+        i32 right = imax(x1, x2);
+        if (left > c[2] || right < c[0]) {
+            return;
+        }
+        draw_run(s, y1, imax(left, c[0]), imin(right, c[2]));
+        return;
+    }
     i32 a[2] = {x1, y1};
     i32 b[2] = {x2, y2};
     if (dashed) {
@@ -1559,7 +1620,13 @@ static void fill_space_rectangle(const struct space *s, i32 l, i32 t, i32 r, i32
 
 static i32 board_to_space(i64 p, int axis)
 {
-    return (i32)sdiv64((p - window[axis]) * halves + (zoom / 2) * 2, 2 * (i64)zoom);
+    i64 t = p - window[axis];
+    // Inside the view (nearly every call) the whole sum fits in 32 bits: the same
+    // quotient without 64-bit arithmetic (|t| < 2^24, halves <= 8, zoom < 2^24).
+    if (t > -0x1000000 && t < 0x1000000 && zoom < 0x1000000) {
+        return ((i32)t * halves + (zoom / 2) * 2) / (2 * zoom);
+    }
+    return (i32)sdiv64(t * halves + (zoom / 2) * 2, 2 * (i64)zoom);
 }
 
 static i32 board_to_steps(i32 d)
@@ -2363,6 +2430,7 @@ static void draw_quarter_arc(const i32 c[2], const i32 ends[4], i32 r, i32 w)
                               2 * (i64)zoom);
     q.cc.board[0] = c[0];
     q.cc.board[1] = c[1];
+    circle_bounds(&q.cc);
     q.cc.k = 0;
     q.cc.y = steps;
     q.cc.decision = 1 - steps;

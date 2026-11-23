@@ -45,11 +45,12 @@ mode the emulated card has, from 640×480 up to 4096×2160, with the same 16 col
 same 8×8 font as the original drivers (read at start-up from your own `VGA640.DRV`). Above 1080 lines it enlarges the whole picture by an
 integer scale and smooths the font (Scale2x / Scale3x), so the text stays readable at 4K.
 
-At 640×480 and 800×600 the picture is pixel-identical to `VGA640.DRV` and `VESA800.DRV`.
+At 640×480 and 800×600 the PCB386 board picture is pixel-identical to `VGA640.DRV` and
+`VESA800.DRV`, with two known exceptions (section 4).
 
-Package version: **1.2.3**; driver version: **1.2.0** (see the changelog at the end). The
+Package version: **1.3.0**; driver version: **1.3.0** (see the changelog at the end). The
 start screen of PCB386 shows
-`Variable resolution advanced VESA driver  v1.2.0  1920x1080 256 colours` with the mode that
+`Variable resolution advanced VESA driver  v1.3.0  1920x1080 256 colours` with the mode that
 was actually set.
 
 ### Package files
@@ -141,9 +142,10 @@ aspect=false
 scaler=none
 
 [cpu]
-# The fastest emulation: PCB386 makes 13 000-45 000 driver calls per redraw.
+# A fixed speed: redraws 2-5 times faster than with cycles=max (section 5).
+# On a slow PC use a lower value.
 core=dynamic
-cycles=max
+cycles=fixed 500000
 
 [mixer]
 # OrCAD makes no sound.
@@ -205,7 +207,7 @@ What each setting does:
 | `vesa modelist width/height limit=0` | No limit on the mode list (the default hides the large modes). |
 | `allow high definition vesa modes=true` | Lists 1920×1080, 2560×1600, 3840×2160, 4096×2160 and the like. |
 | `allow unusual vesa modes=true` | Lists the modes with unusual sizes (848×480, 1440×1080, ...). |
-| `core=dynamic` (or `auto`), `cycles=max` | Redraw speed; see section 5. |
+| `core=dynamic` (or `auto`), `cycles=fixed 500000` | Redraw speed. `cycles=max` works too, but redraws 2–5 times slower; see section 5 for the value to choose. |
 | `umb=true` | The driver runs from an upper memory block. |
 | `z:\dos\loadfix -64` | Programs compressed with Microsoft EXEPACK (some ESP utilities, such as some versions of `ANNOTATE`) stop with `Packed file is corrupt` when DOS loads them in the first 64 KB of memory, and DOSBox-X's small kernel leaves free memory starting there. DOSBox-X retries such a program with LOADFIX only when its own shell starts it (`autoloadfix`), not when the ESP menu does. This has nothing to do with the driver. |
 | `aspect=false`, `scaler=none` | One emulated pixel per screen pixel: no blur and no extra cost. |
@@ -287,6 +289,9 @@ Not set: steps 2 and 3, which find it in a standard installation.
   cursor back and waits for the user; the rate is 1 / that time. It measures how long a
   full board redraw (zoom, pan, refresh) takes, not a refresh rate of the monitor.
 - Not set or 0: off (the default). The overlay costs under 3 % of a redraw.
+- The time is read from the emulated PC's timer, so it is the real time only while
+  DOSBox-X keeps up with its `cycles` setting; with a `cycles` value too high for the PC
+  the rate shown is higher than the real one (section 5).
 
 ## 4. Troubleshooting
 
@@ -301,31 +306,52 @@ Not set: steps 2 and 3, which find it in a standard installation.
 | ESP flashes `MSDOS Error #  6 Invalid Handle` at start; later Tools → Local Configuration says `Unable to redirect STDOUT to a file REPORT.TXT`, and DRAFT started from ESP ignores the keyboard | `EDITOR` in `ESP.CFG` names a file that does not exist (e.g. `'C:\util\ed.EXE'`). ESP's failed open of it closes the console handle by mistake, which then breaks ESP's redirection and the programs it starts. Point `EDITOR` at an editor that exists in the emulated machine, or leave it empty: `EDITOR = ''`. This is not a driver fault; it happens with `VGA640.DRV` too. |
 | The bottom line of the screen is cut off | The window is taller than the desktop: switch to full screen (Alt+Enter or the host key + F) or use a smaller `doscadvres`. |
 | Board picture garbled, menus right | The driver could not get an upper memory block: set `umb=true` and leave some UMB free. |
-| Redraws slow | Use `core=dynamic` and `cycles=max`; a smaller mode or a larger scale draws faster (section 5). |
+| Redraws slow | Use `core=dynamic` and `cycles=fixed 500000` rather than `cycles=max`; a smaller mode or a larger scale draws faster (section 5). |
+| Mouse pointer, key repeat or the clock sluggish after setting `cycles=fixed` | The PC cannot keep up with that value: lower it (section 5). |
+| At 640×480 or 800×600 some thin diagonal tracks are one line where `VGA640.DRV` draws two parallel lines | Known difference, found on one test board at some zoom levels (1.2.0 already had it); not yet fixed. Wider tracks and the other shapes match. |
+| DRAFT opens a sheet zoomed in further than with `VGA640.DRV` | Known difference (1.2.0 already had it); not yet fixed. Zoom out (`Z O`) to see the whole sheet. |
 | Text too small | Raise `doscadvscale`. |
 | Window larger than the desktop | Use a smaller `doscadvres`, or full screen with `fullresolution=desktop`. |
 
 ## 5. Speed
 
-PCB386 draws a board with thousands of small driver calls (13 000–45 000 per redraw on the
-test board), and each call crosses from the DOS extender's protected mode to real mode
-and back. That crossing, not the pixel writes, sets most of the cost, so a larger mode is
-slower mainly because more of the board is visible and more calls are made.
+A redraw is mostly the driver's drawing: about 85 % of the emulated instructions, against
+about 12 % for PCB386 itself. The switches between the DOS extender's protected mode and
+real mode cost little: PCB386 hands its drawing calls to the driver in batches, 40–130
+switches for the 9 000–14 000 calls of a redraw of the test board. The other big factor is
+DOSBox-X's `cycles` setting:
 
-Zoom out / zoom in on the test board, `core=dynamic`, `cycles=max` (ms, lower is better):
+- `cycles=max` adjusts the speed to the load of the PC. While PCB386 waits for a key it
+  asks the keyboard BIOS hundreds of thousands of times per second, and each question is
+  costly for DOSBox-X; DOSBox-X sets its speed from that loop, low, and a redraw starts
+  at that speed. DOSBox-X then sleeps for a third to two thirds of each redraw.
+- `cycles=fixed N` runs N instructions per emulated millisecond. While the PC keeps up, a
+  redraw takes its instructions divided by N. Above what the PC can do, a higher N makes
+  redraws no faster, and the keyboard loop makes the emulated time run slower than the
+  real time: the mouse, key repeat, the clock and the `DOSCADVFPS` rate slow down with it.
 
-| Driver and mode | Zoom out | Zoom in |
-| --- | --- | --- |
-| VGA640.DRV 640×480 | 128 | 95 |
-| VESA1024.DRV 1024×768 | 260 | 170 |
-| DOSCAD.DRV 640×480 | 101 | 80 |
-| DOSCAD.DRV 800×600 | 129 | 91 |
-| DOSCAD.DRV 1024×768 | 167 | 101 |
-| DOSCAD.DRV 1920×1080, scale 2 | 224 | 182 |
-| DOSCAD.DRV 1920×1080, scale 1 | 262–271 | 208–210 |
+`cycles=fixed 500000` suits a current desktop PC: on the PC of the table below the
+emulated time still runs at about 90 % of the real time while PCB386 waits, and redraws are
+2–3 times faster at 1920×1080 and about 5 times at 3840×2160 than with `cycles=max`. On a
+slower PC, if the mouse or the keys feel sluggish, lower it (300000, 200000); a higher
+value gains little (1000000: redraws 5–17 % faster, the emulated time at about 50 %).
 
-So DOSCAD.DRV is faster than the original drivers at the same mode. To speed it up
-further: the fastest CPU core, `cycles=max`, a smaller mode, or a larger scale.
+Zoom out / zoom in on the test board, `core=dynamic`, scale 2 (ms, median of 4–8 redraws,
+lower is better):
+
+| Driver | `cycles` | 1920×1080 | 3840×2160 |
+| --- | --- | --- | --- |
+| 1.2.0 | `max` | 363 / 231 | 1954 / 1951 |
+| 1.3.0 | `max` | 221 / 177 | 1745 / 1615 |
+| 1.3.0 | `fixed 500000` | 109 / 65 | 352 / 312 |
+| 1.3.0 | `fixed 1000000` | 95 / 61 | 291 / 289 |
+
+With `cycles=max` the times vary a lot from one redraw to the next (at 1920×1080 with
+1.2.0, 120–390 ms). Driver 1.3.0 needs 15–17 % fewer instructions per redraw than 1.2.0;
+the rest of its time goes into filling the pixels and the geometry of wide lines. At the
+same mode DOSCAD.DRV was already faster than the original drivers (1.2.0, `cycles=max`,
+640×480: 101 / 80 ms, `VGA640.DRV` 128 / 95 ms). A smaller mode or a larger scale draws
+faster, since less of the board is visible.
 
 ## 6. Build
 
@@ -342,7 +368,7 @@ The build needs no OrCAD file: the 8×8 font is read at run time (section 3, `DO
 
 ```sh
 sh build.sh
-# DOSCAD.DRV v1.2.0: 30112 bytes; image 61344 bytes -> /path/to/DOSCAD.DRV
+# DOSCAD.DRV v1.3.0: 30464 bytes; image 61728 bytes -> /path/to/DOSCAD.DRV
 ```
 
 Overrides: `DOSCAD_OUT` (build directory, default `build/`), `DOSCAD_DRV` (the
@@ -363,6 +389,20 @@ built with `-Os` to fit the 64 KB image.
 
 The version follows semantic versioning: major for a change that needs a new
 configuration, minor for a new feature, patch for a fix.
+
+### 1.3.0 — 2026-11-23
+
+- Faster drawing: 15–17 % fewer emulated instructions per redraw. 32-bit arithmetic where
+  the values fit, the rows of filled shapes go straight to the span fill, the span fill
+  tests the write mode once per span, and the window bounds of board circles and arcs are
+  computed once per shape. The picture is unchanged: pixel-identical to 1.2.0 in every
+  tested mode (PCB386 on three boards from 640×480 to 4096×2160, DRAFT, ESP).
+- Recommended configuration: `cycles=fixed 500000` instead of `cycles=max`, for redraws
+  2–3 times faster at 1920×1080 and about 5 times at 3840×2160 (section 5). Not required:
+  the old configuration still works.
+- Section 5 corrected: the mode switches are not what makes redraws slow.
+- Section 4 lists two known differences from `VGA640.DRV` found by the new tests (both
+  already in 1.2.0).
 
 ### 1.2.3 — 2026-11-23
 
