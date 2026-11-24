@@ -267,7 +267,7 @@ enum { WRITE_REPLACE = 0, WRITE_OR = 1, WRITE_XOR = 2 };
 /// Start-up and shut-down code: built for size, so the drawing code keeps -O2 within the
 /// 64 KB image.
 #define COLD __attribute__((cold))
-#define DOSCAD_VERSION "1.6.1"
+#define DOSCAD_VERSION "1.6.2"
 
 static const u8 COLOUR_TO_VGA[16] = {0, 1, 2, 3, 4, 5, 6, 8, 7, 9, 10, 11, 12, 13, 14, 15};
 static const u8 DASH[4] = {1, 1, 0, 0};
@@ -3588,10 +3588,19 @@ static void run_entry(void)
         break;
     case 39:
         n = fetch_pascal_string(args[(0xe - 6) / 2], args[(0xc - 6) / 2]);
-        if (n == 0 && text_buffer[0] == 0xff) {
-            flag43 = 1;
-        } else if (n == 0 && text_buffer[0] == 0xfe) {
-            flag42 = 1;
+        if (n == 0) {
+            // VGA640 0x196a: an empty string only sets or clears flags by the byte after
+            // its length; the pen stays (DRAFT's prompt line moves it, calls this, then
+            // draws relative text).
+            u8 mark = peek8(args[(0xe - 6) / 2], (u16)(args[(0xc - 6) / 2] + 1));
+            if (mark == 0xff) {
+                flag43 = 1;
+            } else if (mark == 0xfe) {
+                flag42 = 1;
+            } else {
+                flag42 = 0;
+                flag43 = 0;
+            }
         } else if ((arg(6) & 0xff) == 1) {
             draw_text_at(arg(0xa), arg(8), text_buffer, n);
         } else {

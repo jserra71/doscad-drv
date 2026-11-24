@@ -49,9 +49,9 @@ At 640×480 and 800×600 the PCB386 board picture is pixel-identical to `VGA640.
 `VESA800.DRV`, with one known exception (section 4); so is DRAFT's, except the text of a
 zoomed-out sheet (section 4), and ESP's. ESP fills the whole screen at any resolution.
 
-Package version: **1.6.1**; driver version: **1.6.1** (see the changelog at the end). The
+Package version: **1.6.2**; driver version: **1.6.2** (see the changelog at the end). The
 start screen of PCB386 shows
-`Variable resolution advanced VESA driver  v1.6.1  1920x1080 256 colours` with the mode that
+`Variable resolution advanced VESA driver  v1.6.2  1920x1080 256 colours` with the mode that
 was actually set.
 
 ### Package files
@@ -496,6 +496,7 @@ Not set: steps 2 and 3, which find it in a standard installation.
 | DRAFT opens a sheet zoomed in further than with `VGA640.DRV`, or a zoomed-out sheet looks wrong (huge circles, missing arcs) | `DOSCAD.DRV` older than 1.5.0: update. |
 | ESP uses only the top-left part of the screen (at 640×480 its boxes look squashed) | `DOSCAD.DRV` older than 1.6.0: update. |
 | With `cycles=fixed`, the mouse lags in DRAFT, `PCB_C` or `SDT_C` started from ESP, but not when started from the DOS prompt | `DOSCAD.DRV` older than 1.6.1 (no idle halt in programs started from ESP): update. |
+| In DRAFT, the prompt line of a text with a default value (e.g. Edit → Reference → Name: `Reference? CI1`) is blank, only the cursor shows | `DOSCAD.DRV` 1.5.0 to 1.6.1: update. |
 | With `cycles=fixed`, the mouse lags in DRAFT also from the DOS prompt | `SDT.CFG` names `VGA640.DRV` (no idle halt): set `DD = 'DOSCAD.DRV'` and `PDRV` there (section 1). |
 | With `cycles=fixed`, the mouse moves in jumps in ESP but not in PCB386 | ESP uses `VGA640.DRV`, which has no idle halt, so the emulated time falls behind: set `DD = 'DOSCAD.DRV'` in the project's `ESP.CFG` (section 1). |
 | At 2560×1440 the picture is stretched (wrong aspect ratio) | DOSBox-X has no 2560×1440 mode and the driver took 1920×1440 (4:3): add the `vesamoed` line of section 3 ("16:9 sizes the card lacks"). |
@@ -578,7 +579,7 @@ The build needs no OrCAD file: the 8×8 font is read at run time (section 3, `DO
 
 ```sh
 sh build.sh
-# DOSCAD.DRV v1.6.1: 30816 bytes; image 63904 bytes -> /path/to/DOSCAD.DRV
+# DOSCAD.DRV v1.6.2: 30848 bytes; image 63904 bytes -> /path/to/DOSCAD.DRV
 ```
 
 Overrides: `DOSCAD_OUT` (build directory, default `build/`), `DOSCAD_DRV` (the
@@ -601,6 +602,16 @@ built with `-Os` to fit the 64 KB image.
 
 The version follows semantic versioning: major for a change that needs a new
 configuration, minor for a new feature, patch for a fix.
+
+### 1.6.2 — 2026-11-24
+
+- DRAFT: the prompt line of a text with a default value (e.g. Edit → Reference → Name,
+  `Reference? CI1`) was blank, only the cursor showed. DRAFT sends an empty text there
+  that only resets two flags; since 1.5.0 the driver also moved the pen to the screen's
+  corner, so the text drawn next fell off the screen. The driver now leaves the pen
+  alone, like `VGA640.DRV`, and reads those flags from the right byte.
+- Picture otherwise unchanged: pixel-identical to 1.6.1 in every tested mode; the prompt
+  line is pixel-identical to `VGA640.DRV` and `VESA800.DRV`.
 
 ### 1.6.1 — 2026-11-24
 
