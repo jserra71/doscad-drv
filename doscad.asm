@@ -16,6 +16,9 @@
 ;     and calls dispatch() in C.
 ;  3. dispatch() sets ret_ax/ret_dx; the thunk restores the caller's stack,
 ;     writes the return registers and does `retf <argument bytes>`.
+;  4. While the driver is open, int16_hook sits on INT 16h (installed and
+;     removed by doscad.c, entries 0 and 1) and halts the CPU in a program's
+;     key-poll loop, so the emulator idles while the user does nothing.
 
         bits 16
         section .text
@@ -279,6 +282,88 @@ int86:
         db      0x66            ; 32-bit near ret (gcc -m16 calling convention)
         ret
 
+; INT 16h hook. PCB_RM, DRAFT and ESP wait for the user by asking "key
+; waiting?" (AH=01h/11h) hundreds of thousands of times a second; in DOSBox-X
+; each question is a costly callback, so the emulator runs one host core flat
+; out and, with fixed cycles, falls behind real time (the mouse lags).
+; More than IDLE_POLLS empty polls within one BIOS tick (55 ms) means the
+; program is only waiting: each further empty poll of that tick halts the CPU
+; until the next interrupt (timer, keyboard, mouse). A program that polls
+; while it computes (PCB386's autorouter) stays far below the limit. No halt
+; when the mouse moved or a button changed since the last poll (INT 33h
+; function 3 leaves the motion counters to the program), so the arrow
+; follows the mouse at the full rate.
+IDLE_POLLS equ 500
+        global int16_hook
+        global old16
+int16_hook:
+        cmp     ah, 0x01
+        je      .poll
+        cmp     ah, 0x11
+        je      .poll
+        jmp     far [cs:old16]
+.poll:
+        pushf
+        call    far [cs:old16]
+        jnz     .key
+        push    ax
+        push    ds
+        xor     ax, ax
+        mov     ds, ax
+        mov     ax, [0x46c]     ; BIOS tick count, low word
+        cmp     ax, [cs:poll_tick]
+        je      .same_tick
+        mov     [cs:poll_tick], ax
+        mov     word [cs:poll_count], 0
+.same_tick:
+        cmp     word [cs:poll_count], IDLE_POLLS
+        jae     .idle
+        inc     word [cs:poll_count]
+        jmp     .empty
+.idle:
+        push    bx
+        push    cx
+        push    dx
+        mov     ax, 3
+        int     0x33
+        cmp     cx, [cs:mouse_x]
+        jne     .moved
+        cmp     dx, [cs:mouse_y]
+        jne     .moved
+        cmp     bx, [cs:mouse_b]
+        jne     .moved
+        pop     dx
+        pop     cx
+        pop     bx
+        sti
+        hlt
+        jmp     .empty
+.moved:
+        mov     [cs:mouse_x], cx
+        mov     [cs:mouse_y], dx
+        mov     [cs:mouse_b], bx
+        pop     dx
+        pop     cx
+        pop     bx
+.empty:
+        pop     ds
+        pop     ax
+        sti
+        cmp     ax, ax          ; ZF = 1: no key
+        retf    2
+.key:
+        mov     word [cs:poll_count], 0
+        sti
+        retf    2               ; ZF = 0 from the BIOS
+
+        alignb  2
+old16:          dw 0, 0         ; the previous INT 16h vector (offset, segment)
+poll_tick:      dw 0
+poll_count:     dw 0
+mouse_x:        dw 0
+mouse_y:        dw 0
+mouse_b:        dw 0
+
         section .bss
         alignb  4
 args:           resw 32
@@ -291,7 +376,8 @@ g_entry:        resw 1
 saved_ss:       resw 1
 saved_sp:       resw 1
         alignb  16
-; 8 KB: the deepest chain (wide line, arc end, circle) needs over 1 KB, and an
-; overflow overwrites saved_ss/saved_sp just below, so the return to PCB386 fails.
-stack_bottom:   resb 8192
+; 6 KB: the deepest chain (wide line, arc end, circle) used 1404 bytes at most
+; (measured 2026-11-24 in PCB386 and DRAFT with zooms), and an overflow overwrites
+; saved_ss/saved_sp just below, so the return to PCB386 fails.
+stack_bottom:   resb 6144
 stack_top:

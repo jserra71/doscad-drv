@@ -20,6 +20,18 @@
 //  5. With DOSCADVFPS=1, dispatch() times each PCB386 redraw (a board clear to
 //     the next cursor set at a real position) and writes "WxH | 256 | N fps"
 //     at the bottom right.
+//  6. While the driver is open, INT 16h goes through int16_hook (doscad.asm):
+//     a program that only polls for keys is halted until the next interrupt,
+//     so the emulator idles (DOSCADIDLE=0 turns it off). Entry 1 restores
+//     the vector.
+//  7. DRAFT (SDT386+) zooms out with SetScale (entry 10): above 1, host
+//     coordinates are clipped first and then divided by the scale (to_screen),
+//     as VGA640.DRV does with its division table; bitmaps keep their pixel
+//     size and text is the 8x8 font reduced (VGA640 draws a stroke font).
+//  8. ESP asks the screen size (entry 6) before it opens the driver and lays
+//     its screens out for it, so entry 6 picks the mode first (pick_mode).
+//     ESP alone reads DOSCADESPRES=WxH, when set, instead of DOSCADVRES, and
+//     takes the largest scale that fits 640x480 (not DOSCADVSCALE).
 
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -42,6 +54,8 @@ struct regs
 };
 
 extern void int86(struct regs *r);
+extern void int16_hook(void);
+extern u16 old16[2];
 extern u16 args[32];
 extern u16 ret_ax, ret_bx, ret_cx, ret_dx, g_entry;
 
@@ -247,7 +261,10 @@ enum { WRITE_REPLACE = 0, WRITE_OR = 1, WRITE_XOR = 2 };
 #define MAX_SCALE 4
 #define ROW_BUFFER 4096
 /// Version of DOSCAD.DRV (semver); build.sh prints it.
-#define DOSCAD_VERSION "1.3.0"
+/// Start-up and shut-down code: built for size, so the drawing code keeps -O2 within the
+/// 64 KB image.
+#define COLD __attribute__((cold))
+#define DOSCAD_VERSION "1.6.0"
 
 static const u8 COLOUR_TO_VGA[16] = {0, 1, 2, 3, 4, 5, 6, 8, 7, 9, 10, 11, 12, 13, 14, 15};
 static const u8 DASH[4] = {1, 1, 0, 0};
@@ -268,11 +285,14 @@ struct saved_drawing
     i32 pen[2];
     i32 origin[2];
     i32 viewport[4];
+    i32 host_scale;
 };
 
 static int opened;
 /// DOSCADVFPS=1: the frame rate overlay is on.
 static int show_fps;
+/// DOSCADIDLE (default 1): halt the CPU in the keyboard poll loop.
+static int idle_halt, keyboard_hooked;
 static u16 block_segment;
 static int block_allocated;
 static u16 mode_number;
@@ -285,6 +305,9 @@ static int cursor_visible, crosshair;
 static i32 cursor[2], cursor_place[2], origin[2], viewport[4], pen[2];
 static i32 window[4];
 static i32 zoom = 1;
+/// Entry 10 (SetScale): the host's coordinates are this many times larger than the
+/// screen; 1 is the plain case. SDT386+ sets 2 and more when it shows a whole sheet.
+static i32 host_scale = 1;
 static u8 colour;
 static i32 colour_number;
 static int highlight, rectangle_saved;
@@ -443,6 +466,25 @@ static void viewport_offset(i32 off[2])
     off[1] = origin[1] - viewport[1];
 }
 
+/// Host coordinate to screen pixel along one axis (0 = x, 1 = y), with SetScale applied.
+static i32 to_screen(i32 v, int axis)
+{
+    i32 d = v - viewport[axis];
+    if (host_scale > 1) {
+        d /= host_scale;
+    }
+    return d + origin[axis];
+}
+
+/// The viewport on the screen when SetScale is above 1 (same as clip_rectangle at 1).
+static void scaled_clip(i32 c[4])
+{
+    c[0] = imax(origin[0], 0);
+    c[1] = imax(origin[1], 0);
+    c[2] = imin(to_screen(viewport[2], 0), width - 1);
+    c[3] = imin(to_screen(viewport[3], 1), height - 1);
+}
+
 static void clip_rectangle(i32 c[4])
 {
     i32 o[2];
@@ -563,6 +605,7 @@ static void begin_screen_drawing(void)
     for (int i = 0; i < 4; i++) {
         s->viewport[i] = viewport[i];
     }
+    s->host_scale = host_scale;
 }
 
 static void end_screen_drawing(void)
@@ -578,6 +621,7 @@ static void end_screen_drawing(void)
     for (int i = 0; i < 4; i++) {
         viewport[i] = s->viewport[i];
     }
+    host_scale = s->host_scale;
     set_colour(s->colour_number);
 }
 
@@ -587,12 +631,26 @@ static void fill_rectangle(const i32 r[4], u8 col, u8 mode)
 {
     i32 o[2];
     i32 c[4];
-    viewport_offset(o);
-    clip_rectangle(c);
-    i32 l = imax(r[0] + o[0], c[0]);
-    i32 t = imax(r[1] + o[1], c[1]);
-    i32 rr = imin(r[2] + o[0], c[2]);
-    i32 b = imin(r[3] + o[1], c[3]);
+    i32 l, t, rr, b;
+    if (host_scale > 1) {
+        // Clip in host coordinates, then scale both corners (as the original driver).
+        if (r[0] > r[2] || r[1] > r[3] || r[0] > viewport[2] || r[2] < viewport[0] || r[1] > viewport[3]
+            || r[3] < viewport[1]) {
+            return;
+        }
+        scaled_clip(c);
+        l = imax(to_screen(imax(r[0], viewport[0]), 0), c[0]);
+        t = imax(to_screen(imax(r[1], viewport[1]), 1), c[1]);
+        rr = imin(to_screen(imin(r[2], viewport[2]), 0), c[2]);
+        b = imin(to_screen(imin(r[3], viewport[3]), 1), c[3]);
+    } else {
+        viewport_offset(o);
+        clip_rectangle(c);
+        l = imax(r[0] + o[0], c[0]);
+        t = imax(r[1] + o[1], c[1]);
+        rr = imin(r[2] + o[0], c[2]);
+        b = imin(r[3] + o[1], c[3]);
+    }
     if (l > rr || t > b) {
         return;
     }
@@ -725,21 +783,19 @@ static int arrow_fits(const i32 place[2])
     if (place[0] < viewport[0] || place[1] < viewport[1]) {
         return 0;
     }
-    viewport_offset(o);
-    i32 sx = place[0] + o[0];
-    i32 sy = place[1] + o[1];
+    (void)o;
+    i32 sx = to_screen(place[0], 0);
+    i32 sy = to_screen(place[1], 1);
     return sx + 7 <= width - 1 && sy < height - 1;
 }
 
 static void place_arrow(i32 mode, const i32 place[2])
 {
     if (mode && arrow_fits(place)) {
-        i32 o[2];
-        viewport_offset(o);
         cursor_place[0] = place[0];
         cursor_place[1] = place[1];
-        cursor[0] = place[0] + o[0];
-        cursor[1] = place[1] + o[1];
+        cursor[0] = to_screen(place[0], 0);
+        cursor[1] = to_screen(place[1], 1);
         cursor_visible = 1;
         return;
     }
@@ -907,7 +963,7 @@ static void draw_character(const i32 clip[4], i32 x, i32 y, u8 ch, int fcs)
     }
 }
 
-static i32 draw_driver_text(i32 x, i32 y, const char *text)
+COLD static i32 draw_driver_text(i32 x, i32 y, const char *text)
 {
     i32 clip[4];
     clip_rectangle(clip);
@@ -925,9 +981,31 @@ static i32 draw_driver_text(i32 x, i32 y, const char *text)
     return left;
 }
 
-static void draw_driver_name(void)
+COLD static void draw_driver_name(void)
 {
     draw_driver_text(0, DRIVER_NAME_Y, driver_name);
+}
+
+/// Text while SetScale is above 1: every set pixel of the 8x8 glyph is mapped like a
+/// host coordinate, so the text shrinks with the sheet (the original draws a stroke font).
+COLD static void draw_text_small(i32 x, i32 y, const u8 *t, i32 len, int fcs)
+{
+    i32 sc[4];
+    scaled_clip(sc);
+    for (i32 i = 0; i < len; i++) {
+        u8 code = fcs ? t[i] : (u8)(t[i] & 0x7f);
+        if (code < 0x20) {
+            continue;
+        }
+        const u8 *glyph = &FONT[(code - 0x20) * 8];
+        for (i32 r = 0; r < 8; r++) {
+            for (i32 c = 0; c < 8; c++) {
+                if (glyph[r] & (0x80 >> c)) {
+                    plot(sc, to_screen(x + i * 8 + c, 0), to_screen(y - r, 1), colour, write_mode);
+                }
+            }
+        }
+    }
 }
 
 static void draw_text(i32 x, i32 y, const u8 *t, i32 len)
@@ -935,6 +1013,10 @@ static void draw_text(i32 x, i32 y, const u8 *t, i32 len)
     int fcs = flag42;
     flag42 = 0;
     if (len == 0) {
+        return;
+    }
+    if (host_scale > 1) {
+        draw_text_small(x, y, t, len, fcs);
         return;
     }
     if (x + len * 8 < viewport[0] || x > viewport[2] || y > viewport[3] || y - 7 < viewport[1]) {
@@ -1067,6 +1149,15 @@ static void logical_space(struct space *s)
     s->clip[3] = c[3] - o[1];
     s->origin[0] = o[0];
     s->origin[1] = o[1];
+}
+
+/// Screen pixels inside the viewport, for shapes drawn while SetScale is above 1.
+static void scaled_space(struct space *s)
+{
+    scaled_clip(s->clip);
+    s->physical = 0;
+    s->origin[0] = 0;
+    s->origin[1] = 0;
 }
 
 static void plot_space(const struct space *s, i32 x, i32 y)
@@ -1353,7 +1444,20 @@ static void draw_line(i32 x1, i32 y1, i32 x2, i32 y2, int dashed)
     struct space s;
     i32 start[2] = {x1, y1};
     i32 end[2] = {x2, y2};
-    logical_space(&s);
+    if (host_scale > 1) {
+        // Clip in host coordinates, scale the ends, draw in screen pixels.
+        i32 hc[4] = {viewport[0], viewport[1], viewport[2], viewport[3]};
+        if (!clip_segment(hc, start, end)) {
+            return;
+        }
+        start[0] = to_screen(start[0], 0);
+        start[1] = to_screen(start[1], 1);
+        end[0] = to_screen(end[0], 0);
+        end[1] = to_screen(end[1], 1);
+        scaled_space(&s);
+    } else {
+        logical_space(&s);
+    }
     if (dashed) {
         draw_dashed_segment(&s, start, end);
     } else {
@@ -1361,18 +1465,76 @@ static void draw_line(i32 x1, i32 y1, i32 x2, i32 y2, int dashed)
     }
 }
 
+// ---- Wide line (entries 19 and 20) ---------------------------------------------------
+
+/// Three parallel solid lines, one host unit apart at SetScale 1 and 2 (the original
+/// driver's table); a single line above 2. Leaves the pen at the end.
+COLD static void wide_line_relative(i32 dx, i32 dy)
+{
+    static const signed char OFFS[64] = {
+        0, -1, 0, -1, 0, 1, 0, 1, -1, 0, -1, 0, 1, 0, 1, 0, -1, 0, 0, -1, 0, 1, 1, 0, 0, -1, 1, 0, -1, 0, 0, 1,
+        0, -2, 0, -2, 0, 2, 0, 2, -2, 0, -2, 0, 2, 0, 2, 0, -2, 0, 0, -2, 0, 2, 2, 0, 0, -2, 2, 0, -2, 0, 0, 2};
+    i32 sx = pen[0];
+    i32 sy = pen[1];
+    if (host_scale > 2) {
+        draw_line(sx, sy, sx + dx, sy + dy, 0);
+    } else if (dx == 0) {
+        draw_line(sx - host_scale, sy, sx - host_scale, sy + dy, 0);
+        draw_line(sx + host_scale, sy, sx + host_scale, sy + dy, 0);
+        draw_line(sx, sy, sx, sy + dy, 0);
+    } else if (dy == 0) {
+        draw_line(sx, sy - host_scale, sx + dx, sy - host_scale, 0);
+        draw_line(sx, sy + host_scale, sx + dx, sy + host_scale, 0);
+        draw_line(sx, sy, sx + dx, sy, 0);
+    } else {
+        int index;
+        if (iabs(dx) < iabs(dy)) {
+            index = 0;
+        } else if (iabs(dx) > iabs(dy)) {
+            index = 8;
+        } else if (dx == dy) {
+            index = 24;
+        } else {
+            index = 16;
+        }
+        if (host_scale == 2) {
+            index += 32;
+        }
+        draw_line(sx + OFFS[index], sy + OFFS[index + 1], sx + dx + OFFS[index + 2], sy + dy + OFFS[index + 3], 0);
+        draw_line(sx + OFFS[index + 4], sy + OFFS[index + 5], sx + dx + OFFS[index + 6], sy + dy + OFFS[index + 7], 0);
+        draw_line(sx, sy, sx + dx, sy + dy, 0);
+    }
+    pen[0] = sx + dx;
+    pen[1] = sy + dy;
+}
+
 // ---- Bitmap ----------------------------------------------------------------------
 
-static void draw_bitmap(i32 rows, i32 bpr, u16 seg, u16 off)
+/// Positive a / k rounded up (VGA640's table lookup at index a + k - 1).
+static i32 ceil_div(i32 a, i32 k)
 {
+    return (a + k - 1) / k;
+}
+
+/// Entry 32, as VGA640.DRV 0x1227: `rows` rows of `bpr` bytes as they appear on the
+/// screen, at the pen. The pixels keep their size at any SetScale; only the position
+/// is scaled. The clip works in whole bytes (a byte cut by the left or right edge of the
+/// viewport is not drawn), the amounts cut in host units divided by the scale and
+/// rounded up. `function` 1-7 turns and mirrors the source bitmap, whose size is
+/// (xsize + 1) x (ysize + 1) pixels, as VGA640 0x1409 does into its buffer (checked
+/// against it under an emulator for every code); function 0 draws the data as it is.
+COLD static void draw_bitmap(i32 rows, i32 bpr, u16 seg, u16 off, i32 xsize, i32 ysize, i32 function)
+{
+    i32 k = host_scale;
     i32 w = bpr * 8;
-    if (pen[0] > viewport[2] || pen[1] > viewport[3] || pen[0] + w < viewport[0] || pen[1] + rows < viewport[1]) {
+    if (pen[0] > viewport[2] || pen[1] > viewport[3] || pen[0] + w * k < viewport[0]
+        || pen[1] + rows * k < viewport[1]) {
         return;
     }
-    i32 below = imax(pen[1] + rows - 1 - viewport[3], 0);
-    i32 above = imax(viewport[1] - pen[1], 0);
-    i32 right = imax(pen[0] + w - 1 - viewport[2], 0);
-    i32 left = imax(viewport[0] - pen[0], 0);
+    i32 below = ceil_div(imax(pen[1] + rows * k - 1 - viewport[3], 0), k);
+    i32 above = ceil_div(imax(viewport[1] - pen[1], 0), k);
+    i32 right = ceil_div(imax(pen[0] + w * k - 1 - viewport[2], 0), k);
+    i32 left = ceil_div(imax(viewport[0] - pen[0], 0), k);
     i32 first_row = above;
     i32 shown_rows = rows - below - above;
     i32 first_byte = 0;
@@ -1384,18 +1546,37 @@ static void draw_bitmap(i32 rows, i32 bpr, u16 seg, u16 off)
     if (bytes <= 0 || shown_rows <= 0) {
         return;
     }
-    i32 o[2];
+    function &= 7;
+    i32 stride = function != 0 ? xsize / 8 + 1 : bpr;
     i32 clip[4];
-    viewport_offset(o);
-    clip_rectangle(clip);
-    for (i32 row = first_row; row < first_row + shown_rows; row++) {
-        i32 y = pen[1] + row + o[1];
-        for (i32 byte = first_byte; byte < first_byte + bytes; byte++) {
-            u8 bits = peek8(seg, (u16)(off + row * bpr + byte));
-            for (i32 bit = 0; bit < 8; bit++) {
-                if (bits & (0x80 >> bit)) {
-                    plot(clip, pen[0] + byte * 8 + bit + o[0], y, colour, write_mode);
-                }
+    if (k > 1) {
+        scaled_clip(clip);
+    } else {
+        clip_rectangle(clip);
+    }
+    i32 px = to_screen(pen[0], 0);
+    i32 py = to_screen(pen[1], 1);
+    for (i32 y = first_row; y < first_row + shown_rows; y++) {
+        for (i32 x = first_byte * 8; x < (first_byte + bytes) * 8; x++) {
+            // Source pixel (column j, row i) shown at (x, y).
+            i32 i;
+            i32 j;
+            switch (function) {
+            case 0: j = x; i = y; break;
+            case 1: i = x; j = xsize - y; break;
+            case 2: j = xsize - x; i = ysize - y; break;
+            case 3: i = ysize - x; j = y; break;
+            case 4: j = xsize - x; i = y; break;
+            case 5: i = x; j = y; break;
+            case 6: j = x; i = ysize - y; break;
+            default: i = ysize - x; j = xsize - y; break;
+            }
+            // Code 6 copies whole source rows, padding bits included (VGA640).
+            if (function != 0 && (i < 0 || i > ysize || j < 0 || j > (function == 6 ? stride * 8 - 1 : xsize))) {
+                continue;
+            }
+            if (peek8(seg, (u16)(off + i * stride + (j >> 3))) & (0x80 >> (j & 7))) {
+                plot(clip, px + x, py + y, colour, write_mode);
             }
         }
     }
@@ -2593,7 +2774,7 @@ static u16 info16(int off)
 
 /// Finds "key" (a name followed by '=') in the caller's environment.
 /// Returns 1 and the value's place (segment, offset), or 0 when the variable is not set.
-static int find_variable(const char *key, u16 *env, u16 *value)
+COLD static int find_variable(const char *key, u16 *env, u16 *value)
 {
     // The caller's PSP holds the segment of its environment at 0x2c.
     struct regs r = {0};
@@ -2646,7 +2827,7 @@ static int dos_call(u16 function, u16 bx, u16 cx, u16 dx, u16 *ax)
 }
 
 /// Moves the file pointer of handle to offset from the start. Returns 1 on success.
-static int dos_seek(u16 handle, u32 offset)
+COLD static int dos_seek(u16 handle, u32 offset)
 {
     struct regs r = {0};
     r.intno = 0x21;
@@ -2659,7 +2840,7 @@ static int dos_seek(u16 handle, u32 offset)
 }
 
 /// Reads count bytes at offset of the open file into buffer. Returns 1 when all came.
-static int read_at(u16 handle, u32 offset, u8 *buffer, u16 count)
+COLD static int read_at(u16 handle, u32 offset, u8 *buffer, u16 count)
 {
     u16 ax = 0;
     if (!dos_seek(handle, offset)) {
@@ -2673,7 +2854,7 @@ static int read_at(u16 handle, u32 offset, u8 *buffer, u16 count)
 
 /// Reads the font from the file named in font_path after checking that it is VGA640.DRV.
 /// Returns 1 when FONT holds the font.
-static int read_font_file(void)
+COLD static int read_font_file(void)
 {
     u16 handle = 0;
     u16 ax = 0;
@@ -2711,7 +2892,7 @@ static int read_font_file(void)
 
 /// Copies the value at env:p into font_path up to its last '\' (keep_directory)
 /// or whole, then appends tail. Returns 0 when it does not fit.
-static int make_font_path(u16 env, u16 p, int keep_directory, const char *tail)
+COLD static int make_font_path(u16 env, u16 p, int keep_directory, const char *tail)
 {
     int n = 0;
     int cut = 0;
@@ -2746,7 +2927,7 @@ static int make_font_path(u16 env, u16 p, int keep_directory, const char *tail)
 /// Loads the font once: DOSCADFONT (the full path of a VGA640.DRV), else VGA640.DRV
 /// next to the driver named in ORCADDD, else %ORCADESP%\DRV\VGA640.DRV.
 /// Returns 1 when FONT holds the font.
-static int load_font(void)
+COLD static int load_font(void)
 {
     u16 env = 0;
     u16 p = 0;
@@ -2770,7 +2951,7 @@ static int load_font(void)
 
 /// Says in text mode that the font is missing, and waits for a key so it can be read
 /// before PCB386 goes on.
-static void report_missing_font(void)
+COLD static void report_missing_font(void)
 {
     static const char message[] =
         "\r\nDOSCAD.DRV: cannot read the 8x8 font from OrCAD's VGA640.DRV.\r\n"
@@ -2783,7 +2964,7 @@ static void report_missing_font(void)
 }
 
 /// Reads a decimal number at env:*p and moves *p past its digits (0 when there are none).
-static i32 read_number(u16 env, u16 *p)
+COLD static i32 read_number(u16 env, u16 *p)
 {
     i32 v = 0;
     for (;;) {
@@ -2796,13 +2977,60 @@ static i32 read_number(u16 env, u16 *p)
     }
 }
 
+/// 1 when the caller is ESP (ESPMAIN.EXE, or its launcher ORCAD.EXE): the program's
+/// path follows its environment block (after the empty string and a word count).
+COLD static int caller_is_esp(void)
+{
+    struct regs r = {0};
+    r.eax = 0x6200;
+    r.intno = 0x21;
+    int86(&r);
+    u16 psp = (u16)r.ebx;
+    u16 env = (u16)(peek8(psp, 0x2c) | (peek8(psp, 0x2d) << 8));
+    u16 p = 0;
+    while (peek8(env, p) != 0 || peek8(env, (u16)(p + 1)) != 0) {
+        p++;
+    }
+    p += 4;
+    // The file name: after the last '\' or ':'.
+    u16 name = p;
+    for (u16 q = p; peek8(env, q) != 0 && q - p < 128; q++) {
+        if (peek8(env, q) == '\\' || peek8(env, q) == ':') {
+            name = (u16)(q + 1);
+        }
+    }
+    static const char *const ESP_NAMES[2] = {"ESPMAIN.EXE", "ORCAD.EXE"};
+    for (int k = 0; k < 2; k++) {
+        const char *n = ESP_NAMES[k];
+        int i = 0;
+        while (n[i]) {
+            u8 c = peek8(env, (u16)(name + i));
+            if (c >= 'a' && c <= 'z') {
+                c = (u8)(c - 32);
+            }
+            if (c != (u8)n[i]) {
+                break;
+            }
+            i++;
+        }
+        if (n[i] == 0 && peek8(env, (u16)(name + i)) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /// Reads the resolution from DOSCADVRES ("WxH") and the scale from DOSCADVSCALE ("S");
-/// a variable not set leaves its values as they are.
-static void read_requested_mode(i32 *w, i32 *h, i32 *s)
+/// a variable not set leaves its values as they are. ESP takes DOSCADESPRES instead when
+/// it is set, and always scale -1: the largest that fits 640x480, so its text keeps the
+/// size it has on the 640x480 screen ESP was drawn for (set by pick_mode).
+COLD static void read_requested_mode(i32 *w, i32 *h, i32 *s)
 {
     u16 env = 0;
     u16 p = 0;
-    if (find_variable("DOSCADVRES=", &env, &p)) {
+    int esp = caller_is_esp();
+    if ((esp && find_variable("DOSCADESPRES=", &env, &p)) ||
+        find_variable("DOSCADVRES=", &env, &p)) {
         i32 want_w = read_number(env, &p);
         u8 c = peek8(env, p);
         // Without the 'x' and a height the value is ignored: the largest mode is used.
@@ -2812,7 +3040,9 @@ static void read_requested_mode(i32 *w, i32 *h, i32 *s)
             *h = read_number(env, &p);
         }
     }
-    if (find_variable("DOSCADVSCALE=", &env, &p)) {
+    if (esp) {
+        *s = -1;
+    } else if (find_variable("DOSCADVSCALE=", &env, &p)) {
         i32 want_s = read_number(env, &p);
         if (want_s > 0) {
             *s = want_s;
@@ -2823,12 +3053,59 @@ static void read_requested_mode(i32 *w, i32 *h, i32 *s)
     if (find_variable("DOSCADVFPS=", &env, &p)) {
         show_fps = (read_number(env, &p) == 1);
     }
+    // The idle halt is on unless DOSCADIDLE=0.
+    idle_halt = 1;
+    if (find_variable("DOSCADIDLE=", &env, &p)) {
+        idle_halt = (read_number(env, &p) != 0);
+    }
+}
+
+/// Hooks INT 16h (int16_hook in doscad.asm) while the driver is open.
+COLD static void hook_keyboard(void)
+{
+    if (keyboard_hooked || !idle_halt) {
+        return;
+    }
+    struct regs g = {0};
+    g.intno = 0x21;
+    g.eax = 0x3516;
+    int86(&g);
+    old16[0] = (u16)g.ebx;
+    old16[1] = g.es;
+    struct regs s = {0};
+    s.intno = 0x21;
+    s.eax = 0x2516;
+    s.edx = (u32)(u16)(u32)int16_hook;
+    int86(&s);
+    keyboard_hooked = 1;
+}
+
+/// Restores INT 16h if the vector is still the hook's.
+COLD static void unhook_keyboard(void)
+{
+    if (!keyboard_hooked) {
+        return;
+    }
+    struct regs g = {0};
+    g.intno = 0x21;
+    g.eax = 0x3516;
+    int86(&g);
+    u16 cs_now;
+    __asm__ volatile("mov %%cs, %0" : "=r"(cs_now));
+    if ((u16)g.ebx == (u16)(u32)int16_hook && g.es == cs_now) {
+        __asm__ volatile("pushw %%ds\n\tmov %0, %%ds\n\t"
+                         "mov $0x2516, %%ax\n\tint $0x21\n\tpopw %%ds"
+                         :
+                         : "r"(old16[1]), "d"(old16[0])
+                         : "ax", "memory");
+    }
+    keyboard_hooked = 0;
 }
 
 /// Finds the requested 8bpp mode; when the BIOS lacks it, the largest mode that fits in
 /// the request, or the largest mode of all when none fits or nothing was requested.
 /// Returns 0 when there is no 8bpp mode.
-static u16 choose_mode(i32 want_w, i32 want_h)
+COLD static u16 choose_mode(i32 want_w, i32 want_h)
 {
     struct regs r = {0};
     vbe_info[0] = 'V';
@@ -2901,11 +3178,13 @@ static void append_text(char **p, const char *t)
     }
 }
 
-static int open_screen(void)
+/// Chooses the mode open_screen will set and the screen size in driver pixels, without
+/// setting it: ESP asks the size (entry 6) before it opens the driver (entry 0).
+COLD static int pick_mode(void)
 {
     i32 want_w = 0;
     i32 want_h = 0;
-    // 0: no DOSCADVSCALE, the scale follows the mode's height below.
+    // 0: no DOSCADVSCALE, the scale follows the mode's height below; -1: ESP's.
     i32 s = 0;
     read_requested_mode(&want_w, &want_h, &s);
     mode_number = choose_mode(want_w, want_h);
@@ -2919,6 +3198,26 @@ static int open_screen(void)
     if (granularity_kb == 0) {
         granularity_kb = 64;
     }
+    // Automatic scale: 2 from 1080 lines up, where the 8x8 text gets too
+    // small; 1 below, as the original drivers up to 1280x1024.
+    if (s == 0) {
+        s = (phys_h >= 1080) ? 2 : 1;
+    } else if (s < 0) {
+        s = imin(phys_w / 640, phys_h / 480);
+    }
+    scale = imin(imax(s, 1), MAX_SCALE);
+    width = phys_w / scale;
+    height = phys_h / scale;
+    halves = 2 * scale;
+    saved_offset = (((u32)phys_h * pitch) + 0xffff) & ~0xffffu;
+    return 1;
+}
+
+COLD static int open_screen(void)
+{
+    if (!pick_mode()) {
+        return 0;
+    }
     struct regs r = {0};
     r.eax = 0x4f02;
     r.ebx = mode_number;
@@ -2930,16 +3229,6 @@ static int open_screen(void)
     for (int i = 0; i < 48; i++) {
         out8(0x3c9, DAC[i]);
     }
-    // Automatic scale: 2 from 1080 lines up, where the 8x8 text gets too
-    // small; 1 below, as the original drivers up to 1280x1024.
-    if (s == 0) {
-        s = (phys_h >= 1080) ? 2 : 1;
-    }
-    scale = imin(imax(s, 1), MAX_SCALE);
-    width = phys_w / scale;
-    height = phys_h / scale;
-    halves = 2 * scale;
-    saved_offset = (((u32)phys_h * pitch) + 0xffff) & ~0xffffu;
     char *p = driver_name;
     // The banner of the start screen: name, version and the mode actually set.
     append_text(&p, "Variable resolution advanced VESA driver  v" DOSCAD_VERSION "  ");
@@ -2963,6 +3252,7 @@ static void reset_state(void)
     flag42 = 0;
     flag43 = 0;
     write_mode = WRITE_OR;
+    host_scale = 1;
     drawing_depth = 0;
     rectangle_saved = 0;
     arrow_drawn = 0;
@@ -2970,7 +3260,7 @@ static void reset_state(void)
 
 // ---- Memory block (entries 2 and 3) ----------------------------------------------
 
-static u16 dos_allocate(u16 paragraphs, u16 *largest)
+COLD static u16 dos_allocate(u16 paragraphs, u16 *largest)
 {
     struct regs r = {0};
     r.eax = 0x4800;
@@ -2984,7 +3274,7 @@ static u16 dos_allocate(u16 paragraphs, u16 *largest)
     return (u16)r.eax;
 }
 
-static void dos_free(u16 seg)
+COLD static void dos_free(u16 seg)
 {
     struct regs r = {0};
     r.eax = 0x4900;
@@ -2993,7 +3283,7 @@ static void dos_free(u16 seg)
     int86(&r);
 }
 
-static void allocate_block(void)
+COLD static void allocate_block(void)
 {
     if (block_allocated) {
         return;
@@ -3006,7 +3296,7 @@ static void allocate_block(void)
     block_allocated = block_segment != 0;
 }
 
-static void entry_allocate(void)
+COLD static void entry_allocate(void)
 {
     allocate_block();
     poke16((u16)args[(0xe - 6) / 2], (u16)args[(0xc - 6) / 2], block_segment);
@@ -3015,7 +3305,7 @@ static void entry_allocate(void)
     ret_ax = 0;
 }
 
-static void entry_bitmap_buffer(void)
+COLD static void entry_bitmap_buffer(void)
 {
     i32 rows = arg(0xa);
     i32 bpr = width / 8;
@@ -3042,6 +3332,57 @@ static void rectangle_args(i32 r[4])
     r[3] = arg(6);
 }
 
+/// Entries 21 and 22 (VGA640 0x21bd): circle or stadium with radii rx, ry; the pen moves
+/// to the centre. With SetScale above 1 the clip test is in host units and the radii are
+/// divided by the scale (nothing drawn when one becomes 0).
+COLD static void draw_circle_entry(i32 x, i32 y, i32 rx, i32 ry, int filled)
+{
+    pen[0] = x;
+    pen[1] = y;
+    struct space s;
+    if (host_scale > 1) {
+        if (x - rx > viewport[2] || x + rx < viewport[0] || y - ry > viewport[3] || y + ry < viewport[1]) {
+            return;
+        }
+        scaled_space(&s);
+        draw_circle_or_stadium(&s, to_screen(x, 0), to_screen(y, 1), rx / host_scale, ry / host_scale, filled,
+                               0);
+    } else {
+        logical_space(&s);
+        draw_circle_or_stadium(&s, x, y, rx, ry, filled, 0);
+    }
+}
+
+/// Entry 17 (VGA640 0x0836): quarter arc of radius r and width w around c, from one end
+/// to the other; the pen moves to c unless the arc is outside the viewport. With
+/// SetScale above 1 the radius, the width and the distances to the ends are divided by
+/// the scale (at least 1).
+COLD static void draw_pixel_arc(const i32 c[2], const i32 e[4], i32 r, i32 w)
+{
+    if (imin(e[0], e[2]) > viewport[2] + w || imax(e[0], e[2]) < viewport[0] - w
+        || imin(e[1], e[3]) > viewport[3] + w || imax(e[1], e[3]) < viewport[1] - w) {
+        return;
+    }
+    pen[0] = c[0];
+    pen[1] = c[1];
+    struct space s;
+    if (host_scale > 1) {
+        i32 k = host_scale;
+        i32 sc[2] = {to_screen(c[0], 0), to_screen(c[1], 1)};
+        i32 se[4];
+        for (int i = 0; i < 4; i++) {
+            i32 d = e[i] - c[i & 1];
+            i32 m = imax(iabs(d) / k, 1);
+            se[i] = sc[i & 1] + (d == 0 ? 0 : (d < 0 ? -m : m));
+        }
+        scaled_space(&s);
+        pixel_quarter_arc(&s, sc, se, imax(r / k, 1), imax(w / k, 1), 0);
+    } else {
+        logical_space(&s);
+        pixel_quarter_arc(&s, c, e, r, w, 0);
+    }
+}
+
 static void run_entry(void)
 {
     i32 r[4];
@@ -3064,12 +3405,14 @@ static void run_entry(void)
         }
         opened = 1;
         set_timer_mode(2);
+        hook_keyboard();
         reset_state();
         ret_ax = 0;
         break;
     case 1:
         if (opened) {
             opened = 0;
+            unhook_keyboard();
             set_timer_mode(3);
             struct regs t = {0};
             t.eax = 3;
@@ -3093,6 +3436,11 @@ static void run_entry(void)
         draw_driver_name();
         break;
     case 6:
+        // VGA640.DRV answers 639x479 even before it is opened; ESP asks then and lays
+        // its screens out for that size.
+        if (!opened) {
+            pick_mode();
+        }
         poke16((u16)args[3], (u16)args[2], (u16)(width - 1));
         poke16((u16)args[1], (u16)args[0], (u16)(height - 1));
         break;
@@ -3109,7 +3457,10 @@ static void run_entry(void)
         set_colour(args[0] & 0xff);
         break;
     case 9:
-        ret_ax = 1;
+        ret_ax = (u16)host_scale;
+        break;
+    case 10:
+        host_scale = imax(imin(arg(6) & 0xffff, 255), 1);
         break;
     case 11:
         rectangle_args(viewport);
@@ -3134,12 +3485,31 @@ static void run_entry(void)
         draw_wide_arc(arg32(0x24), arg32(0x20), arg32(0x1c), arg32(0x18), arg32(0x14),
                       arg32(0x10), arg32(0xc), arg32(8), arg(6) & 0xff);
         break;
-    case 21:
+    case 19:
+        pen[0] = arg(0xc);
+        pen[1] = arg(0xa);
+        wide_line_relative(arg(8) - arg(0xc), arg(6) - arg(0xa));
+        break;
+    case 20:
+        wide_line_relative(arg(8), arg(6));
+        break;
+    case 17:
         {
-        struct space s;
-        logical_space(&s);
-        draw_circle_or_stadium(&s, arg(0xe), arg(0xc), arg(0xa), arg(8), (arg(6) & 0xff) != 0, 0);
+        i32 c[2] = {arg(0x14), arg(0x12)};
+        i32 e[4] = {arg(0x10), arg(0xe), arg(0xc), arg(0xa)};
+        draw_pixel_arc(c, e, arg(8), arg(6));
         }
+        break;
+    case 21:
+        draw_circle_entry(arg(0xe), arg(0xc), arg(0xa), arg(8), (arg(6) & 0xff) != 0);
+        break;
+    case 22:
+        draw_circle_entry(pen[0] + arg(0xe), pen[1] + arg(0xc), arg(0xa), arg(8), (arg(6) & 0xff) != 0);
+        break;
+    case 24:
+        draw_line(pen[0], pen[1], pen[0] + arg(8), pen[1] + arg(6), 1);
+        pen[0] += arg(8);
+        pen[1] += arg(6);
         break;
     case 23:
     case 28:
@@ -3170,7 +3540,7 @@ static void run_entry(void)
     case 32:
         pen[0] += arg(0xe);
         pen[1] += arg(0xc);
-        draw_bitmap(arg(0x12), arg(0x10), args[(0x16 - 6) / 2], args[(0x14 - 6) / 2]);
+        draw_bitmap(arg(0x12), arg(0x10), args[(0x16 - 6) / 2], args[(0x14 - 6) / 2], arg(0xa), arg(8), arg(6) & 0xff);
         break;
     case 33:
     case 34:
@@ -3207,12 +3577,20 @@ static void run_entry(void)
             flag42 = 1;
         } else if ((arg(6) & 0xff) == 1) {
             draw_text_at(arg(0xa), arg(8), text_buffer, n);
+        } else {
+            // Text scale 0 (hidden) or other: the original driver still moves the pen.
+            pen[0] = arg(0xa);
+            pen[1] = arg(8);
         }
         break;
     case 40:
         n = fetch_pascal_string(args[(0xe - 6) / 2], args[(0xc - 6) / 2]);
         if ((arg(6) & 0xff) == 1 && !(n == 1 && text_buffer[0] <= 0x20)) {
             draw_text_relative(arg(0xa), arg(8), text_buffer, n);
+        } else {
+            // The original driver always moves the pen, drawn or not.
+            pen[0] += arg(0xa);
+            pen[1] += arg(8);
         }
         flag42 = 0;
         flag43 = 0;
@@ -3274,7 +3652,7 @@ struct trace_record
     u32 time;
     u32 done;
 };
-#define TRACE_RECORDS 400
+#define TRACE_RECORDS 200
 static struct trace_record trace[TRACE_RECORDS];
 static int trace_count;
 static int trace_file_made;
@@ -3366,7 +3744,7 @@ static void time_frame(void)
 
 /// Writes "WxH | 256 | N fps" (one decimal below 10 fps) in white on black at the
 /// bottom right of the screen, leaving the PCB386 drawing state as it was.
-static void draw_fps_overlay(void)
+COLD static void draw_fps_overlay(void)
 {
     char text[40];
     char *p = text;
@@ -3392,6 +3770,8 @@ static void draw_fps_overlay(void)
     saved_origin[1] = origin[1];
     u8 saved_colour = colour;
     u8 saved_mode = write_mode;
+    i32 saved_scale = host_scale;
+    host_scale = 1;
     viewport[0] = 0;
     viewport[1] = 0;
     viewport[2] = width - 1;
@@ -3411,6 +3791,7 @@ static void draw_fps_overlay(void)
     origin[1] = saved_origin[1];
     colour = saved_colour;
     write_mode = saved_mode;
+    host_scale = saved_scale;
 }
 
 /// Called by doscad.asm for every entry.
