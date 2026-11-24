@@ -49,9 +49,9 @@ At 640×480 and 800×600 the PCB386 board picture is pixel-identical to `VGA640.
 `VESA800.DRV`, with one known exception (section 4); so is DRAFT's, except the text of a
 zoomed-out sheet (section 4), and ESP's. ESP fills the whole screen at any resolution.
 
-Package version: **1.6.0**; driver version: **1.6.0** (see the changelog at the end). The
+Package version: **1.6.1**; driver version: **1.6.1** (see the changelog at the end). The
 start screen of PCB386 shows
-`Variable resolution advanced VESA driver  v1.6.0  1920x1080 256 colours` with the mode that
+`Variable resolution advanced VESA driver  v1.6.1  1920x1080 256 colours` with the mode that
 was actually set.
 
 ### Package files
@@ -94,6 +94,9 @@ when it loads, which some antivirus programs report as suspicious; the sources a
      itself reads `DD` in the project's `ESP.CFG`: set it to `DOSCAD.DRV` too
      (`DD = 'DOSCAD.DRV'`), so ESP also has the idle halt (section 5) and fills the
      screen. Use the same file name everywhere (section 4).
+   - DRAFT reads `DD` in the project's `SDT.CFG`: set it to `DOSCAD.DRV` there, with
+     `PDRV` naming the driver directory. When `SDT.CFG` names a driver DRAFT finds, it
+     takes that one, whatever `ORCADDD` says.
 3. Configure DOSBox-X (section 2) and, if wanted, the driver (section 3).
 4. Start PCB386 as usual. The banner must show the mode you asked for.
 
@@ -247,6 +250,129 @@ section 3; for a 2560×1440 monitor see "16:9 sizes the card lacks" there). Alt+
 switches between window and full screen. Use it when the bottom line of PCB386 does not
 fit in the window.
 
+### Common setups
+
+Start from the complete file above; each setup lists only the lines to change.
+Whatever the setup, check first:
+
+- `DOSCAD.DRV` and OrCAD's `VGA640.DRV` (for the font) in `C:\ORCADESP\DRV`.
+- `DD = 'DOSCAD.DRV'` in the project's `ESP.CFG`, `PCB.CFG` and `SDT.CFG`, with `PDRV`
+  naming that directory: ESP and DRAFT take the driver from these files, `orcaddd`
+  covers PCB386 and the configuration programs.
+- `cycles=fixed 1000000` (lower on a slow PC, setup G) and no `doscadidle`.
+
+| Setup | What it gives |
+| --- | --- |
+| A. 1920×1080 monitor, window | The file above as it is. |
+| B. 1920×1080 monitor, full screen | The whole monitor, pixel for pixel. |
+| C. 2560×1440 monitor | True 16:9 (DOSBox-X lacks the mode: `VESAMOED`). |
+| D. 16:10 monitor (1920×1200, 2560×1600) | Native modes, nothing special. |
+| E. 4K monitor (3840×2160) | Scale 2 by default, 3 for larger text. |
+| F. Original look, 640×480 | As `VGA640.DRV`, on any monitor (scaled by DOSBox-X). |
+| G. Slow PC, or laptop on battery | A lower fixed speed. |
+| H. Keeping `cycles=max` | Behaves as driver 1.3.0. |
+
+#### A. 1920×1080 monitor, in a window
+
+No change. On a 1920×1080 screen the title bar and the taskbar take some lines, so the
+bottom line of PCB386 may not fit: use B, or a smaller mode for the window:
+
+```ini
+[sdl]
+windowresolution=1440x900
+
+[autoexec]
+set doscadvres=1440x900
+```
+
+(`1280x720` works the same way.) Below 1080 lines the scale is 1: more working area,
+smaller text.
+
+#### B. 1920×1080 monitor, full screen
+
+```ini
+[sdl]
+fullscreen=true
+fullresolution=desktop
+
+[autoexec]
+set doscadvres=1920x1080
+```
+
+#### C. 2560×1440 monitor
+
+```ini
+[sdl]
+fullscreen=true
+fullresolution=desktop
+
+[autoexec]
+# Before OrCAD starts: turn the 2560x1600 mode (0x371) into 2560x1440.
+z:\debug\vesamoed -mode 0x371 -w 2560 -h 1440
+set doscadvres=2560x1440
+```
+
+PCB386 and DRAFT get 1280×720 (scale 2); ESP and its configuration programs 853×480
+(scale 3). Without the `vesamoed` line the driver takes 1920×1440 (4:3), stretched to
+16:9 (section 3, "16:9 sizes the card lacks").
+
+#### D. 16:10 monitor (1920×1200, 2560×1600)
+
+```ini
+[sdl]
+fullscreen=true
+fullresolution=desktop
+
+[autoexec]
+set doscadvres=2560x1600
+```
+
+#### E. 4K monitor (3840×2160)
+
+```ini
+[sdl]
+fullscreen=true
+fullresolution=desktop
+
+[autoexec]
+set doscadvres=3840x2160
+rem larger text (PCB386 then sees 1280x720): set doscadvscale=3
+```
+
+#### F. Original look, 640×480
+
+```ini
+[autoexec]
+set doscadvres=640x480
+```
+
+Pixel-identical to `VGA640.DRV` (section 4 lists the known exceptions), with the idle
+halt. To keep the large screen in PCB386 and DRAFT and give only ESP its original
+size, set `doscadespres=640x480` instead (section 3).
+
+#### G. Slow PC, or laptop on battery
+
+```ini
+[cpu]
+cycles=fixed 500000
+```
+
+Redraws take longer, but the mouse and the clock keep real time. If the mouse still
+lags, try `300000`.
+
+#### H. Keeping `cycles=max`
+
+```ini
+[cpu]
+cycles=max
+
+[autoexec]
+set doscadidle=0
+```
+
+One core of the PC at 100 % all the time and redraws slower than with a fixed speed
+(section 5). Without `doscadidle=0`, `cycles=max` gives slow, uneven redraws.
+
 ## 3. Driver variables
 
 All are DOS environment variables, read each time a program (PCB386, DRAFT, ESP) opens
@@ -306,7 +432,8 @@ you do not use (`z:\debug\vesamoed -?` lists its options).
 ### `DOSCADESPRES=WxH` — ESP's own resolution
 
 ESP takes the resolution of `DOSCADVRES` like the other programs and lays its screens
-out for it, so it fills the whole screen. Its scale is always the largest that fits
+out for it, so it fills the whole screen. ESP's configuration programs (`ESP_C`, `PCB_C`,
+`SDT_C`, `PLD_C`, `VST_C`) are treated as ESP. Its scale is always the largest that fits
 640×480 in the mode (1 up to 1024×768, 2 at 1280×960 and 1920×1080, 3 at 2560×1440,
 4 at 3840×2160), so its text stays as large as on the 640×480 screen ESP was drawn for;
 `DOSCADVSCALE` does not apply to ESP.
@@ -368,6 +495,8 @@ Not set: steps 2 and 3, which find it in a standard installation.
 | At 640×480 or 800×600 some thin diagonal tracks are one line where `VGA640.DRV` draws two parallel lines | Known difference, found on one test board at some zoom levels (1.2.0 already had it); not yet fixed. Wider tracks and the other shapes match. |
 | DRAFT opens a sheet zoomed in further than with `VGA640.DRV`, or a zoomed-out sheet looks wrong (huge circles, missing arcs) | `DOSCAD.DRV` older than 1.5.0: update. |
 | ESP uses only the top-left part of the screen (at 640×480 its boxes look squashed) | `DOSCAD.DRV` older than 1.6.0: update. |
+| With `cycles=fixed`, the mouse lags in DRAFT, `PCB_C` or `SDT_C` started from ESP, but not when started from the DOS prompt | `DOSCAD.DRV` older than 1.6.1 (no idle halt in programs started from ESP): update. |
+| With `cycles=fixed`, the mouse lags in DRAFT also from the DOS prompt | `SDT.CFG` names `VGA640.DRV` (no idle halt): set `DD = 'DOSCAD.DRV'` and `PDRV` there (section 1). |
 | With `cycles=fixed`, the mouse moves in jumps in ESP but not in PCB386 | ESP uses `VGA640.DRV`, which has no idle halt, so the emulated time falls behind: set `DD = 'DOSCAD.DRV'` in the project's `ESP.CFG` (section 1). |
 | At 2560×1440 the picture is stretched (wrong aspect ratio) | DOSBox-X has no 2560×1440 mode and the driver took 1920×1440 (4:3): add the `vesamoed` line of section 3 ("16:9 sizes the card lacks"). |
 | In DRAFT, the text of a zoomed-out sheet looks different from `VGA640.DRV` | Known difference: `VGA640.DRV` draws it with a stroke font, `DOSCAD.DRV` with its 8×8 font reduced. Everything else matches. |
@@ -449,7 +578,7 @@ The build needs no OrCAD file: the 8×8 font is read at run time (section 3, `DO
 
 ```sh
 sh build.sh
-# DOSCAD.DRV v1.6.0: 30960 bytes; image 64512 bytes -> /path/to/DOSCAD.DRV
+# DOSCAD.DRV v1.6.1: 30816 bytes; image 63904 bytes -> /path/to/DOSCAD.DRV
 ```
 
 Overrides: `DOSCAD_OUT` (build directory, default `build/`), `DOSCAD_DRV` (the
@@ -472,6 +601,19 @@ built with `-Os` to fit the 64 KB image.
 
 The version follows semantic versioning: major for a change that needs a new
 configuration, minor for a new feature, patch for a fix.
+
+### 1.6.1 — 2026-11-24
+
+- The idle halt now works in the programs ESP starts (DRAFT, the configuration programs
+  `PCB_C` and `SDT_C`, ...). When ESP starts a program, the keyboard interrupt is reset
+  after the driver has hooked it, so with `cycles=fixed` those programs ran at about a
+  fifth of real time and the mouse lagged; the driver now puts its hook back.
+- ESP's configuration programs (`*_C.EXE`) are drawn like ESP: the scale that fits
+  640×480 and `DOSCADESPRES`.
+- README: DRAFT takes its driver from `SDT.CFG`; two troubleshooting rows; "Common
+  setups" (section 2): the configuration for each kind of monitor, the original
+  640×480 look, a slow PC and `cycles=max`.
+- Picture unchanged: pixel-identical to 1.6.0 in every tested mode.
 
 ### 1.6.0 — 2026-11-24
 

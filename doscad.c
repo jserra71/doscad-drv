@@ -30,8 +30,11 @@
 //     size and text is the 8x8 font reduced (VGA640 draws a stroke font).
 //  8. ESP asks the screen size (entry 6) before it opens the driver and lays
 //     its screens out for it, so entry 6 picks the mode first (pick_mode).
-//     ESP alone reads DOSCADESPRES=WxH, when set, instead of DOSCADVRES, and
-//     takes the largest scale that fits 640x480 (not DOSCADVSCALE).
+//     ESP and its configuration programs (*_C.EXE) read DOSCADESPRES=WxH, when
+//     set, instead of DOSCADVRES, and take the largest scale that fits 640x480
+//     (not DOSCADVSCALE).
+//  9. Programs started from ESP find INT 16h reset to the vector the hook
+//     replaced; dispatch() puts the hook back (keep_keyboard_hook).
 
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -264,7 +267,7 @@ enum { WRITE_REPLACE = 0, WRITE_OR = 1, WRITE_XOR = 2 };
 /// Start-up and shut-down code: built for size, so the drawing code keeps -O2 within the
 /// 64 KB image.
 #define COLD __attribute__((cold))
-#define DOSCAD_VERSION "1.6.0"
+#define DOSCAD_VERSION "1.6.1"
 
 static const u8 COLOUR_TO_VGA[16] = {0, 1, 2, 3, 4, 5, 6, 8, 7, 9, 10, 11, 12, 13, 14, 15};
 static const u8 DASH[4] = {1, 1, 0, 0};
@@ -2977,8 +2980,25 @@ COLD static i32 read_number(u16 env, u16 *p)
     }
 }
 
-/// 1 when the caller is ESP (ESPMAIN.EXE, or its launcher ORCAD.EXE): the program's
-/// path follows its environment block (after the empty string and a word count).
+/// 1 when the environment string at env:p, in capitals, is text and then ends.
+COLD static int env_name_is(u16 env, u16 p, const char *text)
+{
+    for (; *text; text++, p++) {
+        u8 c = peek8(env, p);
+        if (c >= 'a' && c <= 'z') {
+            c = (u8)(c - 32);
+        }
+        if (c != (u8)*text) {
+            return 0;
+        }
+    }
+    return peek8(env, p) == 0;
+}
+
+/// 1 when the caller is ESP (ESPMAIN.EXE, its launcher ORCAD.EXE) or one of ESP's
+/// configuration programs (ESP_C, PCB_C, SDT_C, PLD_C, VST_C: *_C.EXE), all drawn for
+/// 640x480. The program's path follows its environment block (after the empty string
+/// and a word count).
 COLD static int caller_is_esp(void)
 {
     struct regs r = {0};
@@ -2994,30 +3014,14 @@ COLD static int caller_is_esp(void)
     p += 4;
     // The file name: after the last '\' or ':'.
     u16 name = p;
-    for (u16 q = p; peek8(env, q) != 0 && q - p < 128; q++) {
+    u16 q = p;
+    for (; peek8(env, q) != 0 && q - p < 128; q++) {
         if (peek8(env, q) == '\\' || peek8(env, q) == ':') {
             name = (u16)(q + 1);
         }
     }
-    static const char *const ESP_NAMES[2] = {"ESPMAIN.EXE", "ORCAD.EXE"};
-    for (int k = 0; k < 2; k++) {
-        const char *n = ESP_NAMES[k];
-        int i = 0;
-        while (n[i]) {
-            u8 c = peek8(env, (u16)(name + i));
-            if (c >= 'a' && c <= 'z') {
-                c = (u8)(c - 32);
-            }
-            if (c != (u8)n[i]) {
-                break;
-            }
-            i++;
-        }
-        if (n[i] == 0 && peek8(env, (u16)(name + i)) == 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return env_name_is(env, name, "ESPMAIN.EXE") || env_name_is(env, name, "ORCAD.EXE") ||
+           (q - name > 6 && env_name_is(env, (u16)(q - 6), "_C.EXE"));
 }
 
 /// Reads the resolution from DOSCADVRES ("WxH") and the scale from DOSCADVSCALE ("S");
@@ -3078,6 +3082,19 @@ COLD static void hook_keyboard(void)
     s.edx = (u32)(u16)(u32)int16_hook;
     int86(&s);
     keyboard_hooked = 1;
+}
+
+/// Puts the hook back when the INT 16h vector has been reset to the one it replaced: the
+/// ESP launcher does that to the programs it starts (DRAFT, PCB_C, SDT_C). A vector set to
+/// anything else is left alone. Interrupts are off while the C code runs.
+static void keep_keyboard_hook(void)
+{
+    if (keyboard_hooked && peek16(0, 0x58) == old16[0] && peek16(0, 0x5a) == old16[1]) {
+        u16 cs_now;
+        __asm__ volatile("mov %%cs, %0" : "=r"(cs_now));
+        poke16(0, 0x58, (u16)(u32)int16_hook);
+        poke16(0, 0x5a, cs_now);
+    }
 }
 
 /// Restores INT 16h if the vector is still the hook's.
@@ -3803,6 +3820,7 @@ void dispatch(void)
     if (opened) {
         hide_arrow();
     }
+    keep_keyboard_hook();
     run_entry();
     if (opened && show_fps) {
         time_frame();
