@@ -159,6 +159,17 @@ static i64 sdiv64(i64 n, i64 d)
 /// Floor division for a positive divisor, like Rust's `div_euclid`.
 static i64 div_floor(i64 n, i64 d)
 {
+    // Both in 32 bits (nearly every call): one idiv gives the truncated quotient and
+    // the remainder, whose sign is n's; a negative remainder means one less.
+    i32 n32 = (i32)n;
+    i32 d32 = (i32)d;
+    if (n == n32 && d == d32 && d32 > 0) {
+        i32 q32 = n32 / d32;
+        if (n32 % d32 < 0) {
+            q32--;
+        }
+        return q32;
+    }
     i64 q = sdiv64(n, d);
     if (n - q * d < 0) {
         q--;
@@ -204,9 +215,11 @@ static u8 in8(u16 port)
     return v;
 }
 
-static u16 peek16(u16 seg, u16 off)
+static inline u16 peek16(u16 seg, u16 off)
 {
-    return (u16)(peek8(seg, off) | (peek8(seg, (u16)(off + 1)) << 8));
+    u16 v;
+    __asm__ volatile("movw %w1, %%fs\n\tmovw %%fs:(%k2), %0" : "=r"(v) : "r"(seg), "r"((u32)off));
+    return v;
 }
 
 /// PIT clock: 1193182 counts per second.
@@ -283,7 +296,7 @@ enum { WRITE_REPLACE = 0, WRITE_OR = 1, WRITE_XOR = 2 };
 /// Start-up and shut-down code: built for size, so the drawing code keeps -O2 within the
 /// 64 KB image.
 #define COLD __attribute__((cold))
-#define DOSCAD_VERSION "1.6.3"
+#define DOSCAD_VERSION "1.7.0"
 
 static const u8 COLOUR_TO_VGA[16] = {0, 1, 2, 3, 4, 5, 6, 8, 7, 9, 10, 11, 12, 13, 14, 15};
 static const u8 DASH[4] = {1, 1, 0, 0};
@@ -315,10 +328,12 @@ static int idle_halt, keyboard_hooked;
 static u16 block_segment;
 static int block_allocated;
 static u16 mode_number;
-static i32 phys_w, phys_h, pitch, scale;
-static u32 granularity_kb;
+static i32 phys_w, phys_h, scale;
+// pitch, granularity_kb and current_bank are read by the span kernel in doscad.asm.
+i32 pitch;
+u32 granularity_kb;
 static u32 vram_bytes;
-static int current_bank = -1;
+int current_bank = -1;
 static i32 width, height, halves;
 static int cursor_visible, crosshair;
 static i32 cursor[2], cursor_place[2], origin[2], viewport[4], pen[2];
@@ -375,100 +390,32 @@ static void vram_write(u32 off, u8 v)
     *(volatile u8 __seg_gs *)(u32)(u16)off = v;
 }
 
-static u8 written_value(u8 old, u8 col, u8 mode)
+// The span kernel (doscad.asm): 32-bit near calls with the arguments in eax, edx, ecx.
+// span_fill writes physical pixels left..right_exclusive-1 of row y, in pieces that
+// stay inside one 64 KB bank; pixel_put writes one pixel. Both use span_colour (the
+// colour in all four bytes) and span_mode (WRITE_REPLACE, WRITE_OR or WRITE_XOR).
+extern void span_fill(i32 y, i32 left, i32 right_exclusive) __attribute__((regparm(3)));
+extern void pixel_put(i32 x, i32 y) __attribute__((regparm(3)));
+u32 span_colour;
+u8 span_mode;
+
+static inline __attribute__((always_inline)) void span_style(u8 col, u8 mode)
 {
-    if (mode == WRITE_REPLACE) {
-        return col;
-    }
-    if (mode == WRITE_XOR) {
-        return old ^ col;
-    }
-    return old | col;
+    span_colour = (u32)col * 0x01010101u;
+    span_mode = mode;
 }
 
 static void write_pixel(i32 x, i32 y, u8 col, u8 mode)
 {
-    u32 off = (u32)y * (u32)pitch + (u32)x;
-    set_bank((int)(off >> 16));
-    volatile u8 __seg_gs *p = (volatile u8 __seg_gs *)(u32)(u16)off;
-    if (mode == WRITE_REPLACE) {
-        *p = col;
-        return;
-    }
-    *p = written_value(*p, col, mode);
-}
-
-/// Writes span bytes from offset start of the current bank.
-/// The aligned middle goes in 32-bit accesses: each VRAM access of the
-/// emulator costs the same for a byte or a dword, so a long span is about
-/// four times faster. One string or read-modify-write loop per write mode,
-/// with the mode tested once per span instead of once per access.
-static void fill_bank_span(u16 start, u32 span, u8 col, u8 mode)
-{
-    u32 wide = (u32)col * 0x01010101u;
-    // leading bytes up to a 4-byte boundary, then dwords, then the last bytes
-    u32 head = (u32)(-start & 3);
-    if (head > span) {
-        head = span;
-    }
-    u32 words = (span - head) / 4;
-    u32 tail = span - head - words * 4;
-    u16 di = start;
-    if (mode == WRITE_REPLACE) {
-        __asm__ volatile("pushw %%es\n\tpushw %%gs\n\tpopw %%es\n\tcld\n\t"
-                         "mov %2, %%ecx\n\trep stosb\n\t"
-                         "mov %3, %%ecx\n\trep stosl\n\t"
-                         "mov %4, %%ecx\n\trep stosb\n\tpopw %%es"
-                         : "+D"(di)
-                         : "a"(wide), "r"(head), "r"(words), "r"(tail)
-                         : "ecx", "memory", "cc");
-        return;
-    }
-    volatile u8 __seg_gs *p = (volatile u8 __seg_gs *)(u32)start;
-    volatile u32 __seg_gs *q = (volatile u32 __seg_gs *)(u32)(u16)(start + head);
-    volatile u8 __seg_gs *r = (volatile u8 __seg_gs *)(u32)(u16)(start + head + words * 4);
-    if (mode == WRITE_XOR) {
-        for (u32 i = 0; i < head; i++) {
-            p[i] ^= col;
-        }
-        for (u32 w = 0; w < words; w++) {
-            q[w] ^= wide;
-        }
-        for (u32 i = 0; i < tail; i++) {
-            r[i] ^= col;
-        }
-        return;
-    }
-    for (u32 i = 0; i < head; i++) {
-        p[i] |= col;
-    }
-    for (u32 w = 0; w < words; w++) {
-        q[w] |= wide;
-    }
-    for (u32 i = 0; i < tail; i++) {
-        r[i] |= col;
-    }
+    span_style(col, mode);
+    pixel_put(x, y);
 }
 
 /// Writes physical pixels left..right_exclusive-1 of row y.
-/// Done in spans that stay inside one 64 KB bank: one bank switch per span
-/// instead of a check per pixel (a 3840x2160 screen clear took over 40 s).
 static void fill_physical_row(i32 y, i32 left, i32 right_exclusive, u8 col, u8 mode)
 {
-    if (left >= right_exclusive) {
-        return;
-    }
-    u32 off = (u32)y * (u32)pitch + (u32)left;
-    u32 count = (u32)(right_exclusive - left);
-    while (count > 0) {
-        // the span ends at the row end or at the end of the current bank
-        u32 in_bank = 0x10000 - (off & 0xffff);
-        u32 span = count < in_bank ? count : in_bank;
-        set_bank((int)(off >> 16));
-        fill_bank_span((u16)off, span, col, mode);
-        off += span;
-        count -= span;
-    }
+    span_style(col, mode);
+    span_fill(y, left, right_exclusive);
 }
 
 // ---- Geometry helpers --------------------------------------------------------
@@ -1261,6 +1208,15 @@ static void scaled_space(struct space *s)
 
 static void plot_space(const struct space *s, i32 x, i32 y)
 {
+    // Physical space (scale 1, or wide lines in screen pixels): straight to the kernel.
+    if (s->physical) {
+        if (x < s->clip[0] || x > s->clip[2] || y < s->clip[1] || y > s->clip[3]) {
+            return;
+        }
+        span_style(colour, write_mode);
+        pixel_put(x + s->origin[0], y + s->origin[1]);
+        return;
+    }
     i32 c[4] = {s->clip[0] + s->origin[0], s->clip[1] + s->origin[1], s->clip[2] + s->origin[0],
                 s->clip[3] + s->origin[1]};
     i32 sx = x + s->origin[0];
@@ -1844,7 +1800,8 @@ static void pixel_quarter_arc(const struct space *s, const i32 c[2], const i32 e
                               i32 w, int dashed);
 
 // Pixel space with the viewport origin: board shapes are drawn at full resolution.
-static void physical_space(struct space *s)
+// Flattened (its helpers inlined here only): every wide line asks for it.
+static void __attribute__((flatten)) physical_space(struct space *s)
 {
     i32 o[2];
     i32 c[4];
@@ -1872,6 +1829,12 @@ static void space_line(const struct space *s, i32 x1, i32 y1, i32 x2, i32 y2, in
         if (left > c[2] || right < c[0]) {
             return;
         }
+        if (s->physical) {
+            // span_fill ignores an empty run (left >= right_exclusive), like draw_run
+            span_style(colour, write_mode);
+            span_fill(y1 + s->origin[1], imax(left, c[0]) + s->origin[0], imin(right, c[2]) + s->origin[0] + 1);
+            return;
+        }
         draw_run(s, y1, imax(left, c[0]), imin(right, c[2]));
         return;
     }
@@ -1891,6 +1854,13 @@ static void fill_space_rectangle(const struct space *s, i32 l, i32 t, i32 r, i32
     r = imin(r, s->clip[2]);
     b = imin(b, s->clip[3]);
     if (l > r || t > b) {
+        return;
+    }
+    if (s->physical) {
+        span_style(colour, write_mode);
+        for (i32 y = t; y <= b; y++) {
+            span_fill(y + s->origin[1], l + s->origin[0], r + s->origin[0] + 1);
+        }
         return;
     }
     for (i32 y = t; y <= b; y++) {
@@ -1921,6 +1891,12 @@ static i32 at_least_one(i32 v)
 
 static i64 steps_to_board(i32 st)
 {
+    // st * zoom below 2^28 (st >= 0, one 32x32 multiply): the sum fits in 32 bits and is
+    // positive, so the floor division is the truncating one.
+    u64 product = (u64)(u32)st * (u32)zoom;
+    if (product < 0x10000000u) {
+        return ((i32)product * 4 + halves) / (2 * halves);
+    }
     return div_floor((i64)st * 4 * zoom + halves, 2 * (i64)halves);
 }
 
@@ -2355,6 +2331,35 @@ static void draw_pixel_wide_line(const struct space *s, i32 mode, i32 width, con
 
 static void draw_wide_line(i32 x1, i32 y1, i32 x2, i32 y2, i32 w, i32 mode)
 {
+    struct space s;
+    // Fast path for the common case, with the same results as the general path below:
+    // - every input within 2^28 (top 3 bits of value + 2^28 clear), so the sums fit in
+    //   32 bits and w * halves too (halves <= 8);
+    // - both ends inside the view widened by w: clip_board_segment would keep them;
+    // - each end within 2^24 of the window corner, zoom below 2^24: board_to_space's
+    //   32-bit branch, inlined.
+    u32 range = ((u32)x1 + 0x10000000u) | ((u32)y1 + 0x10000000u) | ((u32)x2 + 0x10000000u) |
+                ((u32)y2 + 0x10000000u) | ((u32)w + 0x10000000u) |
+                ((u32)window[0] + 0x10000000u) | ((u32)window[1] + 0x10000000u) |
+                ((u32)window[2] + 0x10000000u) | ((u32)window[3] + 0x10000000u);
+    if ((range & 0xe0000000u) == 0 && halves <= 8 && zoom < 0x1000000 &&
+        x1 >= window[0] - w && x1 <= window[2] + w && x2 >= window[0] - w &&
+        x2 <= window[2] + w && y1 >= window[1] - w && y1 <= window[3] + w &&
+        y2 >= window[1] - w && y2 <= window[3] + w) {
+        i32 t[4] = {x2 - window[0], y2 - window[1], x1 - window[0], y1 - window[1]};
+        if ((u32)(t[0] + 0xffffff) < 0x1ffffff && (u32)(t[1] + 0xffffff) < 0x1ffffff &&
+            (u32)(t[2] + 0xffffff) < 0x1ffffff && (u32)(t[3] + 0xffffff) < 0x1ffffff) {
+            i32 round = (zoom / 2) * 2;
+            i32 twice = 2 * zoom;
+            i32 pa[2] = {(t[0] * halves + round) / twice, (t[1] * halves + round) / twice};
+            i32 pb[2] = {(t[2] * halves + round) / twice, (t[3] * halves + round) / twice};
+            // sdiv64 truncates toward zero, like the 32-bit division
+            i32 pw = w * halves / twice;
+            physical_space(&s);
+            draw_pixel_wide_line(&s, mode, pw, pa, pb);
+            return;
+        }
+    }
     i64 area[4] = {(i64)window[0] - w, (i64)window[1] - w, (i64)window[2] + w,
                    (i64)window[3] + w};
     i64 b[2] = {x1, y1};
@@ -2362,7 +2367,6 @@ static void draw_wide_line(i32 x1, i32 y1, i32 x2, i32 y2, i32 w, i32 mode)
     if (!clip_board_segment(area, a, b)) {
         return;
     }
-    struct space s;
     physical_space(&s);
     i32 pa[2] = {board_to_space(a[0], 0), board_to_space(a[1], 1)};
     i32 pb[2] = {board_to_space(b[0], 0), board_to_space(b[1], 1)};
@@ -3965,7 +3969,8 @@ void dispatch(void)
 #ifdef DOSCAD_TRACE
     trace_entry();
 #endif
-    if (opened) {
+    // (the tests of hide_arrow and show_arrow, here: most calls need neither)
+    if (opened && arrow_drawn) {
         hide_arrow();
     }
     keep_keyboard_hook();
@@ -3977,7 +3982,7 @@ void dispatch(void)
             draw_fps_overlay();
         }
     }
-    if (opened) {
+    if (opened && cursor_visible) {
         show_arrow();
     }
 #ifdef DOSCAD_TRACE

@@ -143,9 +143,12 @@ load_routine:
         pop     bp
         retf    4
 
-; Decompress DS:SI..DS:BX into ES:DI. Token byte t: t < 0x80 copies t+1
-; literal bytes; t >= 0x80 copies (t & 0x7f) + 3 bytes from a word distance
-; back in the output (the copy may overlap itself).
+; Decompress DS:SI..DS:BX into ES:DI (lzpack.py). Token byte t:
+;  t < 0x40: copy t+1 literal bytes;
+;  0x40 <= t < 0x80: copy ((t >> 3) & 7) + 2 bytes from ((t & 7) * 256 + the
+;    next byte + 1) back in the output;
+;  t >= 0x80: copy (t & 0x7f) + 3 bytes from a word distance back.
+; A copy may overlap itself.
 decompress:
         mov     [cs:image_segment], es
 .next:
@@ -154,15 +157,23 @@ decompress:
         xor     cx, cx
         lodsb
         mov     cl, al
-        test    cl, 0x80
-        jnz     .match
-        inc     cx
-        rep     movsb
-        jmp     .next
-.match:
+        cmp     al, 0x40
+        jb      .literals
+        test    al, 0x80
+        jnz     .far
+        and     al, 7
+        mov     ah, al
+        lodsb
+        inc     ax
+        shr     cl, 3
+        and     cl, 7
+        add     cl, 2
+        jmp     .copy
+.far:
         and     cl, 0x7f
         add     cx, 3
         lodsw
+.copy:
         push    si
         push    ds
         mov     si, di
@@ -172,6 +183,10 @@ decompress:
         rep     movsb
         pop     ds
         pop     si
+        jmp     .next
+.literals:
+        inc     cx
+        rep     movsb
         jmp     .next
 .done:
         ret

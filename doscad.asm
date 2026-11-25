@@ -11,11 +11,12 @@
 ;  1. PCB386 far-calls offset 0 (jmp to load_routine) with a far pointer to
 ;     its driver record; we fill the record (entry table offset) and return
 ;     the driver size in paragraphs, like VGA640.DRV.
-;  2. PCB386 far-calls an entry through the table; the thunk saves every
-;     register, copies the stack arguments to `args`, switches to our stack
-;     and calls dispatch() in C.
-;  3. dispatch() sets ret_ax/ret_dx; the thunk restores the caller's stack,
-;     writes the return registers and does `retf <argument bytes>`.
+;  2. PCB386 far-calls an entry through the table; the entry's stub jumps to
+;     entry_common, which switches to our stack first, saves every register
+;     there, copies the stack arguments to `args` and calls dispatch() in C.
+;  3. dispatch() sets ret_ax/ret_dx (the saved registers themselves); the
+;     registers come back, and the stub restores the caller's stack and does
+;     `retf <argument bytes>`. Nothing is written on the caller's stack.
 ;  4. While the driver is open, int16_hook sits on INT 16h (installed and
 ;     removed by doscad.c, entries 0 and 1) and halts the CPU in a program's
 ;     key-poll loop, so the emulator idles while the user does nothing.
@@ -98,34 +99,23 @@ load_routine:
         pop     bp
         retf    4
 
-; One thunk per entry: N = entry number, B = argument bytes popped by retf.
+; One stub per entry: N = entry number, B = argument bytes popped by retf.
+; The stubs are all STUB_SIZE bytes, in entry order, so entry_common finds the
+; return half of stub N at e0 + N * STUB_SIZE + STUB_RETURN. `strict` keeps the
+; jump at 3 bytes: nasm would shorten it for the stubs near entry_common.
 %macro ENTRY 2
 e%1:
-        push    bp
-        mov     bp, sp
-        push    ds
-        push    es
-        pushad
-        push    fs
-        push    gs
-        push    cs
-        pop     ds
-        cld
-        mov     ax, %1
-        mov     cx, %2
-        call    entry_common
-        pop     gs
-        pop     fs
-        popad
-        pop     es
-        pop     ds
-        pop     bp
-%if %2 == 0
-        retf
-%else
-        retf    %2
-%endif
+        mov     [cs:saved_ax], ax
+        mov     ax, %1 | (%2 << 8)
+        jmp     strict near entry_common
+        ; entry_common returns here on our stack, registers and flags restored
+        mov     ss, [cs:saved_ss]
+        mov     sp, [cs:saved_sp]       ; no interrupt between the two (mov ss)
+        db      0xca                    ; retf B (also for B = 0: fixed size)
+        dw      %2
 %endmacro
+STUB_SIZE       equ 23
+STUB_RETURN     equ 10
 
         ENTRY 0, 0xa
         ENTRY 1, 0
@@ -180,66 +170,69 @@ e%1:
         ENTRY 50, 0
         ENTRY 51, 8
 
-; Shared body: AX = entry number, CX = argument bytes, BP = thunk frame.
-; Return-register slots of the pushad frame: AX [bp-8], CX [bp-12],
-; DX [bp-16], BX [bp-20].
+; Shared body: AL = entry number, AH = argument bytes, the caller's AX in
+; saved_ax, SS:SP = the caller's stack (return address, then the arguments).
+;
+; Nothing is written on the caller's stack: PCB_RM's stack shares a 4 KB page
+; with its code, and DOSBox-X's dynamic core takes every write into a page that
+; holds translated code through a slow handler (the old thunk made ~21 such
+; writes per call, ~350 000 per zoom-in redraw of PR41).
+;
+; Our stack, from stack_top down: the stub's return offset, the flags (with the
+; caller's IF), the pushad frame (its AX, CX, DX and BX words are ret_ax,
+; ret_cx, ret_dx and ret_bx: dispatch() writes the return registers in place),
+; DS, ES, FS, GS.
 entry_common:
-        mov     [g_entry], ax
-        ; copy the caller's stack arguments (last pushed first) into args
-        push    ds
-        pop     es
-        mov     di, args
-        lea     si, [bp+6]
-        shr     cx, 1
-        jcxz    .copied
-.copy:
-        mov     ax, [ss:si]
-        stosw
-        add     si, 2
-        loop    .copy
-.copied:
-        mov     ax, [bp-8]
-        mov     [ret_ax], ax
-        mov     ax, [bp-12]
-        mov     [ret_cx], ax
-        mov     ax, [bp-16]
-        mov     [ret_dx], ax
-        mov     ax, [bp-20]
-        mov     [ret_bx], ax
-        ; switch to our own stack: the caller's may be small
-        mov     [saved_ss], ss
-        mov     [saved_sp], sp
-        ; dispatch() returns with ebp = 0 (cleared below, callee-saved by
-        ; gcc), so keep the frame pointer for the return-register writes
-        mov     [saved_bp], bp
+        mov     [cs:saved_sp], sp
+        mov     [cs:saved_ss], ss
+        mov     [cs:saved_entry], ax
         mov     ax, cs
-        cli
         mov     ss, ax
-        mov     esp, stack_top
-        ; Interrupts stay off while the C code runs: 16-bit interrupt
-        ; handlers (mouse, timer, extender) may not keep the high halves of
-        ; the 32-bit registers gcc -m16 code relies on.
+        mov     esp, stack_top          ; no interrupt between the two (mov ss)
+        movzx   ax, byte [cs:saved_entry]
+        imul    ax, ax, STUB_SIZE
+        add     ax, e0 + STUB_RETURN
+        push    ax
+        ; Interrupts stay off while the C code runs: 16-bit interrupt handlers
+        ; (mouse, timer, extender) may not keep the high halves of the 32-bit
+        ; registers gcc -m16 code relies on. PCB386 calls with them on; popf
+        ; gives the caller's IF back at the end (sti would cost more: the
+        ; dynamic core hands it to the interpreter).
+        pushf
+        cli
+        mov     ax, [cs:saved_ax]
+        pushad
+        push    ds
+        push    es
+        push    fs
+        push    gs
+        cld
+        ; copy the caller's stack arguments (last pushed first) into args
+        push    cs
+        pop     es
+        lds     si, [cs:saved_sp]
+        add     si, 4
+        mov     di, args
+        movzx   cx, byte [cs:saved_entry + 1]
+        shr     cx, 1
+        rep movsw
+        push    cs
+        pop     ds
+        movzx   ax, byte [saved_entry]
+        mov     [g_entry], ax
         mov     ax, 0xa000
         mov     gs, ax
         xor     ebp, ebp
         ; 32-bit near call: gcc -m16 code returns with a 32-bit ret.
         ; (`o32 call` would get a 16-bit displacement from nasm.)
         call    dword dispatch
-        mov     ss, [cs:saved_ss]
-        mov     sp, [cs:saved_sp]
-        mov     bp, [cs:saved_bp]
-        sti
-        push    cs
+        pop     gs
+        pop     fs
+        pop     es
         pop     ds
-        mov     ax, [ret_ax]
-        mov     [bp-8], ax
-        mov     ax, [ret_cx]
-        mov     [bp-12], ax
-        mov     ax, [ret_dx]
-        mov     [bp-16], ax
-        mov     ax, [ret_bx]
-        mov     [bp-20], ax
-        ret
+        popad
+        popf
+        ret                             ; to the return half of the entry's stub
 
 ; void int86(struct regs *r): run int 10h or int 21h (r->intno) with the
 ; registers of r and store the results back (C calling convention, -m16).
@@ -281,6 +274,188 @@ int86:
         pop     ebp
         db      0x66            ; 32-bit near ret (gcc -m16 calling convention)
         ret
+
+; ---- Span kernel ----------------------------------------------------------
+; Called from C (doscad.c, span_fill and pixel_put) by 32-bit near calls with
+; regparm(3) arguments in eax, edx, ecx; ebx, esi, edi and ebp are kept.
+; Every row of the picture goes through span_fill, so it is written for
+; DOSBox-X's dynamic core, where each instruction costs the same: few
+; instructions per row, the write mode tested once, dwords at any alignment
+; (VRAM is host memory there), rep stos for long replace runs.
+        extern pitch
+        extern current_bank
+        extern granularity_kb
+        extern span_colour
+        extern span_mode
+        global span_fill
+        global pixel_put
+
+; Moves the VESA window to 64 KB bank EAX and records it in current_bank
+; (16-bit near call, every register kept).
+bank_switch:
+        mov     [current_bank], eax
+        pushad
+        shl     eax, 6                  ; KB
+        xor     edx, edx
+        div     dword [granularity_kb]
+        mov     edx, eax
+        mov     ax, 0x4f05
+        xor     bx, bx
+        int     0x10
+        popad
+        ret
+
+; void span_fill(i32 y, i32 left, i32 right_exclusive): pixels left..right-1
+; of row y in span_colour / span_mode (0 replace, 1 or, 2 xor); GS = A000.
+; Nothing is written when left >= right_exclusive.
+; The window offset is addressed as [gs:eax] (32-bit addressing, always below
+; 0x10000), so no register needs saving. OR and replace may write a byte twice
+; (the last dword overlaps the one before): the result is the same. XOR may not.
+span_fill:
+        sub     ecx, edx                ; ecx = pixels
+        jle     .ret
+        imul    eax, [pitch]
+        add     eax, edx                ; eax = VRAM offset of the first pixel
+.piece:
+        mov     edx, eax
+        shr     edx, 16
+        cmp     edx, [current_bank]
+        jne     .switch
+.banked:
+        movzx   edx, ax
+        add     edx, ecx
+        cmp     edx, 0x10000
+        ja      .split                  ; runs into the next bank
+        movzx   eax, ax                 ; eax = offset in the window
+        mov     edx, [span_colour]
+        cmp     byte [span_mode], 1
+        jne     .not_or
+        cmp     ecx, 4
+        jb      .or_bytes
+        lea     ecx, [eax+ecx-4]        ; ecx = offset of the last dword
+.or_dwords:
+        or      [gs:eax], edx
+        add     eax, 4
+        cmp     eax, ecx
+        jb      .or_dwords
+        or      [gs:ecx], edx
+.ret:
+        db      0x66                    ; 32-bit near ret (gcc -m16 calling convention)
+        ret
+.or_bytes:
+        or      [gs:eax], dl
+        inc     eax
+        dec     ecx
+        jnz     .or_bytes
+        db      0x66
+        ret
+.not_or:
+        ja      .xor
+        cmp     ecx, 4
+        jb      .mov_bytes
+        cmp     ecx, 16
+        jae     .mov_string
+        lea     ecx, [eax+ecx-4]
+.mov_dwords:
+        mov     [gs:eax], edx
+        add     eax, 4
+        cmp     eax, ecx
+        jb      .mov_dwords
+        mov     [gs:ecx], edx
+        db      0x66
+        ret
+.mov_bytes:
+        mov     [gs:eax], dl
+        inc     eax
+        dec     ecx
+        jnz     .mov_bytes
+        db      0x66
+        ret
+.mov_string:                            ; 16 bytes or more: rep stos, ES = GS
+        push    edi
+        push    es
+        push    gs
+        pop     es
+        mov     edi, eax
+        mov     eax, edx
+        mov     edx, ecx
+        shr     ecx, 2
+        rep stosd
+        mov     ecx, edx
+        and     ecx, 3
+        rep stosb
+        pop     es
+        pop     edi
+        db      0x66
+        ret
+.xor:                                   ; no overlap: dwords, then bytes
+        push    ecx
+        shr     ecx, 2
+        jz      .xor_tail
+.xor_dwords:
+        xor     [gs:eax], edx
+        add     eax, 4
+        dec     ecx
+        jnz     .xor_dwords
+.xor_tail:
+        pop     ecx
+        and     ecx, 3
+        jz      .ret
+.xor_bytes:
+        xor     [gs:eax], dl
+        inc     eax
+        dec     ecx
+        jnz     .xor_bytes
+        db      0x66
+        ret
+.switch:
+        xchg    eax, edx
+        call    bank_switch
+        xchg    eax, edx
+        jmp     .banked
+.split:                                 ; a row crosses at most one bank end
+        sub     edx, 0x10000            ; edx = pixels in the next bank
+        sub     ecx, edx                ; ecx = pixels in this one
+        push    eax
+        push    ecx
+        push    edx
+        call    dword .banked           ; this bank's part, back by the 32-bit ret
+        pop     ecx
+        pop     edx
+        pop     eax
+        add     eax, edx                ; the next bank's part
+        jmp     .piece
+
+; void pixel_put(i32 x, i32 y): one pixel in span_colour / span_mode.
+pixel_put:
+        imul    edx, [pitch]
+        add     eax, edx
+        mov     edx, eax
+        shr     edx, 16
+        cmp     edx, [current_bank]
+        jne     .switch
+.banked:
+        movzx   eax, ax
+        mov     dl, [span_colour]
+        cmp     byte [span_mode], 1
+        je      .or
+        ja      .xor
+        mov     [gs:eax], dl
+        db      0x66
+        ret
+.or:
+        or      [gs:eax], dl
+        db      0x66
+        ret
+.xor:
+        xor     [gs:eax], dl
+        db      0x66
+        ret
+.switch:
+        xchg    eax, edx
+        call    bank_switch
+        xchg    eax, edx
+        jmp     .banked
 
 ; INT 16h hook. PCB_RM, DRAFT and ESP wait for the user by asking "key
 ; waiting?" (AH=01h/11h) hundreds of thousands of times a second; in DOSBox-X
@@ -365,19 +540,25 @@ mouse_y:        dw 0
 mouse_b:        dw 0
 
         section .bss
-        alignb  4
-args:           resw 32
-ret_ax:         resw 1
-saved_bp:       resw 1
-ret_bx:         resw 1
-ret_cx:         resw 1
-ret_dx:         resw 1
-g_entry:        resw 1
-saved_ss:       resw 1
-saved_sp:       resw 1
         alignb  16
+; The stack comes first, right after the code and constants (link.ld puts this
+; .bss before the C data): its unused bottom keeps the data written on every
+; call out of the 4 KB pages that hold code, which DOSBox-X's dynamic core
+; writes through a slow handler. So keep at least 4 KB of it unused.
 ; 6 KB: the deepest chain (wide line, arc end, circle) used 1404 bytes at most
-; (measured 2026-11-24 in PCB386 and DRAFT with zooms), and an overflow overwrites
-; saved_ss/saved_sp just below, so the return to PCB386 fails.
+; (measured 2026-11-24 in PCB386 and DRAFT with zooms).
 stack_bottom:   resb 6144
 stack_top:
+        alignb  4
+args:           resw 32
+g_entry:        resw 1
+saved_sp:       resw 1      ; saved_sp, saved_ss: one far pointer (lds)
+saved_ss:       resw 1
+saved_ax:       resw 1
+saved_entry:    resw 1      ; entry number, then argument bytes
+; The return registers: the caller's AX, CX, DX and BX as pushad stored them
+; on our stack, under the stub's return offset and the flags (entry_common).
+ret_ax          equ stack_top - 8
+ret_cx          equ stack_top - 12
+ret_dx          equ stack_top - 16
+ret_bx          equ stack_top - 20

@@ -48,9 +48,9 @@ integer scale and smooths the font (Scale2x / Scale3x), so the text stays readab
 At 640×480 and 800×600 the PCB386 board picture is pixel-identical to `VGA640.DRV` and
 `VESA800.DRV`; so are DRAFT's, zoomed out too, and ESP's. ESP fills the whole screen at any resolution.
 
-Package version: **1.6.3**; driver version: **1.6.3** (see the changelog at the end). The
+Package version: **1.7.0**; driver version: **1.7.0** (see the changelog at the end). The
 start screen of PCB386 shows
-`Variable resolution advanced VESA driver  v1.6.3  1920x1080 256 colours` with the mode that
+`Variable resolution advanced VESA driver  v1.7.0  1920x1080 256 colours` with the mode that
 was actually set.
 
 ### Package files
@@ -559,7 +559,13 @@ lower is better):
 
 With `cycles=max` the times vary a lot from one redraw to the next (at 1920×1080 with
 1.2.0, 120–390 ms). Driver 1.3.0 needs 15–17 % fewer instructions per redraw than 1.2.0;
-the rest of its time goes into filling the pixels and the geometry of wide lines. At the
+the rest of its time goes into filling the pixels and the geometry of wide lines.
+
+Driver 1.7.0 needs about 40 % fewer instructions than 1.6.3 at 1920×1080, scale 2:
+zoom out 58.5 → 36.7 million, zoom in 40.8 → 22.7 million. Measured the same day at
+`cycles=fixed 1000000`, on a PC busy with other work (so slower than the table above),
+the redraws took about 40 % less time: medians 150 / 86 ms with 1.6.3, 91 / 49 ms with
+1.7.0. At the
 same mode DOSCAD.DRV was already faster than the original drivers (1.2.0, `cycles=max`,
 640×480: 101 / 80 ms, `VGA640.DRV` 128 / 95 ms). A smaller mode or a larger scale draws
 faster, since less of the board is visible.
@@ -579,13 +585,14 @@ The build needs no OrCAD file: the 8×8 font is read at run time (section 3, `DO
 
 ```sh
 sh build.sh
-# DOSCAD.DRV v1.6.3: 31584 bytes; image 64992 bytes -> /path/to/DOSCAD.DRV
+# DOSCAD.DRV v1.7.0: 28896 bytes; image 64384 bytes -> /path/to/DOSCAD.DRV
 ```
 
 Overrides: `DOSCAD_OUT` (build directory, default `build/`), `DOSCAD_DRV` (the
 finished driver, default `DOSCAD.DRV` next to the script).
 
-- `doscad.asm`: the load routine, the entry table and the thunks (real mode, nasm).
+- `doscad.asm`: the load routine, the entry table and the entry thunk, and the span kernel
+  that writes every row and pixel to video memory (real mode, nasm).
 - `doscad.c`: the drawing code (gcc `-m16 -O2`, freestanding).
 - `link.ld`: the flat image (at most 64 KB); `lzpack.py`: its compressor; `stub.asm`: the
   loader that unpacks it into upper memory (PCB386 loads drivers into a fixed 32 KB block,
@@ -602,6 +609,24 @@ built with `-Os` to fit the 64 KB image.
 
 The version follows semantic versioning: major for a change that needs a new
 configuration, minor for a new feature, patch for a fix.
+
+### 1.7.0 — 2026-11-25
+
+- Faster redraws: about 40 % less time at `cycles=fixed 1000000` (section 5), from about
+  40 % fewer emulated instructions per redraw of the test board (1920×1080, scale 2: zoom
+  out 58.5 → 36.7 million, zoom in 40.8 → 22.7 million).
+  - The rows and pixels are written by a small assembly routine.
+  - Wide lines (tracks) inside the view skip the 64-bit clipping and coordinate
+    arithmetic, and floor divisions and arc steps use 32-bit arithmetic when the numbers
+    fit, with the same results.
+  - A driver call no longer writes on PCB386's stack, which shares its memory page with
+    code: DOSBox-X's dynamic core takes such writes through a slow path.
+  - The end of a call no longer needs an instruction (`sti`) that DOSBox-X's dynamic core
+    hands to its interpreter.
+- The image is packed tighter (short matches in 2 bytes), so `DOSCAD.DRV` is about 3 KB
+  smaller (28 896 bytes) and leaves room in PCB386's 32 KB block.
+- Picture unchanged: pixel-identical to 1.6.3 in every tested mode, and to `VGA640.DRV`
+  and `VESA800.DRV` at 640×480 and 800×600.
 
 ### 1.6.3 — 2026-11-25
 

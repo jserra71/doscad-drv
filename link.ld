@@ -15,6 +15,9 @@ SECTIONS
         doscad-asm.o(.text)
         *(.text*)
         *(.rodata*)
+        /* doscad.asm's .bss starts with the stack: see the note there */
+        . = ALIGN(16);
+        doscad-asm.o(.bss)
         *(.data*)
         *(.bss*)
         *(COMMON)
