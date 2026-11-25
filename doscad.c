@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Joaquim Serra
+// SPDX-FileCopyrightText: 2026 Michael Solis
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Developed by Claude Opus 5.5 in high effort mode.
@@ -27,7 +28,7 @@
 //  7. DRAFT (SDT386+) zooms out with SetScale (entry 10): above 1, host
 //     coordinates are clipped first and then divided by the scale (to_screen),
 //     as VGA640.DRV does with its division table; bitmaps keep their pixel
-//     size and text is the 8x8 font reduced (VGA640 draws a stroke font).
+//     size and text is drawn with VGA640's stroke font (draw_stroke_text).
 //  8. ESP asks the screen size (entry 6) before it opens the driver and lays
 //     its screens out for it, so entry 6 picks the mode first (pick_mode).
 //     ESP and its configuration programs (*_C.EXE) read DOSCADESPRES=WxH, when
@@ -35,6 +36,10 @@
 //     (not DOSCADVSCALE).
 //  9. Programs started from ESP find INT 16h reset to the vector the hook
 //     replaced; dispatch() puts the hook back (keep_keyboard_hook).
+// 10. Text at a text scale other than 1, under SetScale above 1, or a single
+//     control character uses the stroke font read from the user's VGA640.DRV
+//     with the 8x8 font (load_strokes, contributed by Michael Solis); without
+//     it the driver falls back to the 8x8 font reduced (draw_text_small).
 
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -67,6 +72,17 @@ extern u16 ret_ax, ret_bx, ret_cx, ret_dx, g_entry;
 #define FONT_SIZE 1792
 static u8 FONT[FONT_SIZE];
 static int font_loaded;
+
+/// The stroke font of VGA640.DRV (its text routine at 0x1a3a): a 256-word table of glyph
+/// pointers, a 32-word table of the alternate glyphs for flag 43, then the glyphs, each a
+/// list of words ended by 0. It is 5348 bytes at 0x5280 of the user's VGA640.DRV, read
+/// into a DOS block at start-up (the block is not in the 32 KB of the driver file). The
+/// pointers keep the original's values: block offset = pointer - 0x460.
+#define STROKE_FILE_OFFSET 0x5280
+#define STROKE_SIZE 5348
+#define STROKE_BASE 0x460
+#define STROKE_ALT 0x200
+static u16 stroke_segment;
 
 // ---- C runtime (no libgcc) -------------------------------------------------
 
@@ -267,7 +283,7 @@ enum { WRITE_REPLACE = 0, WRITE_OR = 1, WRITE_XOR = 2 };
 /// Start-up and shut-down code: built for size, so the drawing code keeps -O2 within the
 /// 64 KB image.
 #define COLD __attribute__((cold))
-#define DOSCAD_VERSION "1.6.2"
+#define DOSCAD_VERSION "1.6.3"
 
 static const u8 COLOUR_TO_VGA[16] = {0, 1, 2, 3, 4, 5, 6, 8, 7, 9, 10, 11, 12, 13, 14, 15};
 static const u8 DASH[4] = {1, 1, 0, 0};
@@ -990,7 +1006,8 @@ COLD static void draw_driver_name(void)
 }
 
 /// Text while SetScale is above 1: every set pixel of the 8x8 glyph is mapped like a
-/// host coordinate, so the text shrinks with the sheet (the original draws a stroke font).
+/// host coordinate, so the text shrinks with the sheet. Only used when the stroke font
+/// could not be read (draw_stroke_text draws it otherwise, as the original does).
 COLD static void draw_text_small(i32 x, i32 y, const u8 *t, i32 len, int fcs)
 {
     i32 sc[4];
@@ -1053,6 +1070,85 @@ static void draw_text_relative(i32 dx, i32 dy, const u8 *t, i32 len)
     pen[0] += dx;
     pen[1] += dy;
     draw_text(pen[0], pen[1], t, len);
+}
+
+static void draw_line(i32 x1, i32 y1, i32 x2, i32 y2, int dashed);
+
+/// Entry 29 (VGA640 0x0362): a line from the pen by (dx, dy); the pen moves to its end.
+static void relative_line(i32 dx, i32 dy)
+{
+    draw_line(pen[0], pen[1], pen[0] + dx, pen[1] + dy, 0);
+    pen[0] += dx;
+    pen[1] += dy;
+}
+
+/// The stroke font text of VGA640.DRV (entries 39 and 40, code at 0x1a3a): used when the
+/// text scale is not 1, a single control character is drawn, or SetScale is above 1. The
+/// glyph steps are multiplied by the text scale in host units and drawn with entry 29's
+/// line, so a zoomed-out sheet scales them like every other line. A negative scale writes
+/// downwards, one 10-unit row per character. A character with bit 7 gets an overbar,
+/// unless flag 42 is set. The pen starts at the text position (the caller put it there)
+/// and returns to it.
+COLD static void draw_stroke_text(const u8 *t, i32 len, i32 scale)
+{
+    i32 start[2] = {pen[0], pen[1]};
+    int fcs = flag42;
+    int alt = flag43;
+    i32 s = scale < 0 ? -scale : scale;
+    i32 step[2] = {0, 0};
+    if (len != 0 && scale != 0) {
+        if (scale < 0) {
+            step[0] = -8 * s;
+            step[1] = 10 * s;
+        }
+        for (i32 i = 0; i < len; i++) {
+            if (i != 0) {
+                pen[0] += step[0];
+                pen[1] += step[1];
+            }
+            u16 code = t[i];
+            if (!fcs) {
+                if (code & 0x80) {
+                    i32 keep[2] = {pen[0], pen[1]};
+                    pen[1] -= 8 * s;
+                    relative_line(8 * s, 0);
+                    pen[0] = keep[0];
+                    pen[1] = keep[1];
+                }
+                code &= 0x7f;
+            }
+            u16 index = (u16)(code * 2);
+            u16 at = index;
+            if (alt) {
+                alt = 0;
+                if (index < 0x40) {
+                    at = (u16)(STROKE_ALT + index);
+                }
+            }
+            u16 glyph = (u16)(peek16(stroke_segment, at) - STROKE_BASE);
+            if (glyph >= STROKE_SIZE) {
+                continue;
+            }
+            for (u16 p = glyph; p + 1 < STROKE_SIZE; p += 2) {
+                u16 w = peek16(stroke_segment, p);
+                if (w == 0) {
+                    break;
+                }
+                i32 dx = (signed char)(w & 0xff);
+                i32 dy = (signed char)(((w >> 8) & 0x7f) << 1) >> 1;
+                if (w & 0x8000) {
+                    relative_line(dx * s, dy * s);
+                } else {
+                    pen[0] += dx * s;
+                    pen[1] += dy * s;
+                }
+            }
+        }
+    }
+    pen[0] = start[0];
+    pen[1] = start[1];
+    flag42 = 0;
+    flag43 = 0;
 }
 
 /// Copies a NUL-terminated far string; returns its length.
@@ -2002,7 +2098,9 @@ static void fit_offsets_to_half(i32 o[2], i32 h)
 {
     i32 target = h * h;
     i32 best_diff = target;
-    i32 best[2] = {0, 0};
+    // VGA640 0x3d32 keeps the best increment, (0, 0) at first: when no candidate is
+    // closer than the target itself, the offsets stay as they are.
+    i32 best[2] = {o[0], o[1]};
     for (i32 ax = 0; ax <= 1; ax++) {
         for (i32 ay = 0; ay <= 1; ay++) {
             i32 px = o[0] + ax;
@@ -2855,6 +2953,34 @@ COLD static int read_at(u16 handle, u32 offset, u8 *buffer, u16 count)
     return ax == count;
 }
 
+COLD static u16 dos_allocate(u16 paragraphs, u16 *largest);
+COLD static void dos_free(u16 seg);
+
+/// Reads the stroke font of the open VGA640.DRV into a DOS block (stroke_segment stays 0
+/// when it cannot: text then falls back to the small 8x8 text). Done once.
+COLD static void load_strokes(u16 handle)
+{
+    if (stroke_segment) {
+        return;
+    }
+    u16 unused = 0;
+    u16 seg = dos_allocate((STROKE_SIZE + 15) / 16, &unused);
+    if (seg == 0) {
+        return;
+    }
+    for (u16 done = 0; done < STROKE_SIZE; done += 1024) {
+        u16 count = (u16)imin(1024, STROKE_SIZE - done);
+        if (!read_at(handle, STROKE_FILE_OFFSET + done, row_buffer, count)) {
+            dos_free(seg);
+            return;
+        }
+        for (u16 i = 0; i < count; i++) {
+            poke8(seg, (u16)(done + i), row_buffer[i]);
+        }
+    }
+    stroke_segment = seg;
+}
+
 /// Reads the font from the file named in font_path after checking that it is VGA640.DRV.
 /// Returns 1 when FONT holds the font.
 COLD static int read_font_file(void)
@@ -2888,6 +3014,9 @@ COLD static int read_font_file(void)
     }
     if (ok && !read_at(handle, VGA640_FONT_OFFSET, FONT, FONT_SIZE)) {
         ok = 0;
+    }
+    if (ok) {
+        load_strokes(handle);
     }
     dos_call(0x3e00, handle, 0, 0, &ax);
     return ok;
@@ -3542,9 +3671,7 @@ static void run_entry(void)
         zoom = imax(arg32(6), 1);
         break;
     case 29:
-        draw_line(pen[0], pen[1], pen[0] + arg(8), pen[1] + arg(6), 0);
-        pen[0] += arg(8);
-        pen[1] += arg(6);
+        relative_line(arg(8), arg(6));
         break;
     case 30:
         pen[0] = arg(8);
@@ -3601,6 +3728,11 @@ static void run_entry(void)
                 flag42 = 0;
                 flag43 = 0;
             }
+        } else if (stroke_segment && (arg(6) != 1 || host_scale != 1 || (n == 1 && text_buffer[0] <= 0x20))) {
+            // VGA640 0x1990: the stroke font (text scale 0 only moves the pen).
+            pen[0] = arg(0xa);
+            pen[1] = arg(8);
+            draw_stroke_text(text_buffer, n, arg(6));
         } else if ((arg(6) & 0xff) == 1) {
             draw_text_at(arg(0xa), arg(8), text_buffer, n);
         } else {
@@ -3611,15 +3743,22 @@ static void run_entry(void)
         break;
     case 40:
         n = fetch_pascal_string(args[(0xe - 6) / 2], args[(0xc - 6) / 2]);
-        if ((arg(6) & 0xff) == 1 && !(n == 1 && text_buffer[0] <= 0x20)) {
-            draw_text_relative(arg(0xa), arg(8), text_buffer, n);
-        } else {
-            // The original driver always moves the pen, drawn or not.
+        if (stroke_segment && (arg(6) != 1 || host_scale != 1 || (n == 1 && text_buffer[0] <= 0x20))) {
+            // VGA640 0x1a24: the pen moves, then the stroke font draws from there.
             pen[0] += arg(0xa);
             pen[1] += arg(8);
+            draw_stroke_text(text_buffer, n, arg(6));
+        } else {
+            if ((arg(6) & 0xff) == 1 && !(n == 1 && text_buffer[0] <= 0x20)) {
+                draw_text_relative(arg(0xa), arg(8), text_buffer, n);
+            } else {
+                // The original driver always moves the pen, drawn or not.
+                pen[0] += arg(0xa);
+                pen[1] += arg(8);
+            }
+            flag42 = 0;
+            flag43 = 0;
         }
-        flag42 = 0;
-        flag43 = 0;
         break;
     case 41:
         if ((args[0] & 0xff) == 0xff) {

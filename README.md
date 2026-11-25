@@ -46,12 +46,11 @@ same 8×8 font as the original drivers (read at start-up from your own `VGA640.D
 integer scale and smooths the font (Scale2x / Scale3x), so the text stays readable at 4K.
 
 At 640×480 and 800×600 the PCB386 board picture is pixel-identical to `VGA640.DRV` and
-`VESA800.DRV`, with one known exception (section 4); so is DRAFT's, except the text of a
-zoomed-out sheet (section 4), and ESP's. ESP fills the whole screen at any resolution.
+`VESA800.DRV`; so are DRAFT's, zoomed out too, and ESP's. ESP fills the whole screen at any resolution.
 
-Package version: **1.6.2**; driver version: **1.6.2** (see the changelog at the end). The
+Package version: **1.6.3**; driver version: **1.6.3** (see the changelog at the end). The
 start screen of PCB386 shows
-`Variable resolution advanced VESA driver  v1.6.2  1920x1080 256 colours` with the mode that
+`Variable resolution advanced VESA driver  v1.6.3  1920x1080 256 colours` with the mode that
 was actually set.
 
 ### Package files
@@ -444,7 +443,8 @@ Going from ESP to PCB386 or DRAFT then switches the mode (and back on return).
 
 ### `DOSCADFONT=path` — where the font is
 
-The driver reads the 8×8 font from OrCAD's `VGA640.DRV` (29 712 bytes, named
+The driver reads the 8×8 font and the stroke font (DRAFT's zoomed-out and scaled text)
+from OrCAD's `VGA640.DRV` (29 712 bytes, named
 `IBM VGA or Compatible 640x480 16 color`; other files are refused). It looks, in order:
 
 1. `DOSCADFONT`, the full DOS path of a `VGA640.DRV` (e.g.
@@ -492,7 +492,7 @@ Not set: steps 2 and 3, which find it in a standard installation.
 | Mouse pointer, key repeat or the clock sluggish after setting `cycles=fixed` | The PC cannot keep up with that value: lower it (section 5). With a driver older than 1.4.0 this also happens at rest: update. |
 | Mouse pointer moves in steps | Set `[dos] mouse report rate=500` and `[video] forcerate=` your monitor's refresh rate (section 2). |
 | Back from PCB386 (or DRAFT) to ESP, the screen stays empty and ESP does not answer | ESP and the program use two DOSCAD driver files with different names (e.g. a renamed copy): use the same file in `ESP.CFG` and in the program's configuration. |
-| At 640×480 or 800×600 some thin diagonal tracks are one line where `VGA640.DRV` draws two parallel lines | Known difference, found on one test board at some zoom levels (1.2.0 already had it); not yet fixed. Wider tracks and the other shapes match. |
+| Thin outlined (hollow) tracks: a diagonal stretch is one line where `VGA640.DRV` draws two parallel lines; hatched zones look sparse, not dense, when zoomed out | `DOSCAD.DRV` older than 1.6.3: update. |
 | DRAFT opens a sheet zoomed in further than with `VGA640.DRV`, or a zoomed-out sheet looks wrong (huge circles, missing arcs) | `DOSCAD.DRV` older than 1.5.0: update. |
 | ESP uses only the top-left part of the screen (at 640×480 its boxes look squashed) | `DOSCAD.DRV` older than 1.6.0: update. |
 | With `cycles=fixed`, the mouse lags in DRAFT, `PCB_C` or `SDT_C` started from ESP, but not when started from the DOS prompt | `DOSCAD.DRV` older than 1.6.1 (no idle halt in programs started from ESP): update. |
@@ -500,7 +500,7 @@ Not set: steps 2 and 3, which find it in a standard installation.
 | With `cycles=fixed`, the mouse lags in DRAFT also from the DOS prompt | `SDT.CFG` names `VGA640.DRV` (no idle halt): set `DD = 'DOSCAD.DRV'` and `PDRV` there (section 1). |
 | With `cycles=fixed`, the mouse moves in jumps in ESP but not in PCB386 | ESP uses `VGA640.DRV`, which has no idle halt, so the emulated time falls behind: set `DD = 'DOSCAD.DRV'` in the project's `ESP.CFG` (section 1). |
 | At 2560×1440 the picture is stretched (wrong aspect ratio) | DOSBox-X has no 2560×1440 mode and the driver took 1920×1440 (4:3): add the `vesamoed` line of section 3 ("16:9 sizes the card lacks"). |
-| In DRAFT, the text of a zoomed-out sheet looks different from `VGA640.DRV` | Known difference: `VGA640.DRV` draws it with a stroke font, `DOSCAD.DRV` with its 8×8 font reduced. Everything else matches. |
+| In DRAFT, the text of a zoomed-out sheet is blocky (the 8×8 font reduced) instead of `VGA640.DRV`'s smooth stroke font | `DOSCAD.DRV` older than 1.6.3: update. With 1.6.3 or later, the driver could not read the stroke font from `VGA640.DRV` (same search as the font, `DOSCADFONT`). |
 | Text too small | Raise `doscadvscale`. |
 | Window larger than the desktop | Use a smaller `doscadvres`, or full screen with `fullresolution=desktop`. |
 
@@ -579,7 +579,7 @@ The build needs no OrCAD file: the 8×8 font is read at run time (section 3, `DO
 
 ```sh
 sh build.sh
-# DOSCAD.DRV v1.6.2: 30848 bytes; image 63904 bytes -> /path/to/DOSCAD.DRV
+# DOSCAD.DRV v1.6.3: 31584 bytes; image 64992 bytes -> /path/to/DOSCAD.DRV
 ```
 
 Overrides: `DOSCAD_OUT` (build directory, default `build/`), `DOSCAD_DRV` (the
@@ -602,6 +602,24 @@ built with `-Os` to fit the 64 KB image.
 
 The version follows semantic versioning: major for a change that needs a new
 configuration, minor for a new feature, patch for a fix.
+
+### 1.6.3 — 2026-11-25
+
+- DRAFT: text of a zoomed-out sheet, scaled text and vertical text are drawn with the
+  stroke font of `VGA640.DRV`, as the original does, instead of the 8×8 font reduced
+  (blocky, and vertical text was missing). Overbars and the alternate glyphs come back
+  too. The stroke font (5 348 bytes) is read at run time from the user's `VGA640.DRV`,
+  like the 8×8 font, into a DOS memory block; if it cannot be read, the driver falls back
+  to the reduced 8×8 font. Contributed by Michael Solis, who checked his text routine
+  against `VGA640.DRV`'s own code in an emulator (274 cases, every line identical).
+- PCB386: a thin outlined (hollow) track, two or three pixels wide, was drawn as one
+  line on its diagonal stretches, where `VGA640.DRV` draws its two edges; hatched zones
+  (whose strokes are such tracks) looked sparse at the start zoom. When no adjustment of
+  the edge offsets fits the half-width better, the driver now keeps them as they are,
+  like `VGA640.DRV`, instead of setting them to 0. Known since 1.2.0.
+- Picture: PCB386, DRAFT and ESP at 640×480 and 800×600 are now pixel-identical to
+  `VGA640.DRV` and `VESA800.DRV` in every tested view (DRAFT zoomed out too). Other modes:
+  thin hollow tracks and DRAFT's text change as above, nothing else.
 
 ### 1.6.2 — 2026-11-24
 
@@ -750,7 +768,8 @@ Documentation only; `DOSCAD.DRV` is unchanged and still reports v1.0.0.
 
 ## Licence
 
-Copyright 2026 Joaquim Serra. GPL-2.0-or-later: you can redistribute and modify it under
+Copyright 2026 Joaquim Serra; the stroke font text (1.6.3) copyright 2026 Michael Solis.
+GPL-2.0-or-later: you can redistribute and modify it under
 the terms of the GNU General Public License as published by the Free Software Foundation,
 either version 2 of the License or (at your option) any later version; the text is in
 `COPYING`. This program is distributed in the hope that it will be useful, but
