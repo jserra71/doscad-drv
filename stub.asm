@@ -12,15 +12,30 @@
 ;
 ; Flow (far Pascal call, one far pointer to the driver record, like VGA640.DRV):
 ;  1. Mark the record as VGA640.DRV does (0xa55a / 0xa55b markers).
-;  2. Allocate a DOS block for the full image, in upper memory when DOS has
-;     it, and decompress it there.
+;  2. Find the resident image of this build (below), or allocate a DOS block
+;     for it, in upper memory when DOS has it, else at the top of conventional
+;     memory; decompress the image there.
 ;  3. Shrink our own block to the stub (unless the record says 0xa55a).
 ;  4. Without a VESA BIOS, print what to set in dosbox.conf and wait for a key.
 ;  5. Fill the record with the entry table of the decompressed image.
 ;  6. Return the stub size in paragraphs.
 ;
+; The image stays resident for the whole DOS session, shared by every load of
+; the same build. Under ESP each program loads its driver into ESP's EMS frame
+; and ESP keeps a pointer to the last loaded driver; when PCB386 or DRAFT load
+; a driver of another file name, ESP calls that driver once more after the
+; program has ended (VGA640.DRV still sits in the EMS frame then). An image in
+; a block of the program was freed by then, and in conventional memory ESP's
+; own code is back over it: ESP jumped into garbage and DOSBox-X hung. So the
+; block belongs to DOS (MCB owner 8, name DOSCAD) and its last paragraph holds
+; the build's identity (IMAGE_ID, 12 bytes) and, at offset 12, the segment of
+; the stroke font block (doscad.c). A load that finds that block unpacks the
+; image again over it (each load starts from a fresh image, as before) but
+; keeps old16 and keyboard_hooked: the INT 16h hook may still be chained.
+;
 ; Built by build.sh with -DFULL_PARAS=<image paragraphs>, -DTABLE=<entry
-; table offset> and -DPAYLOAD="<compressed image>".
+; table offset>, -DOLD16=<old16 offset>, -DKBHOOKED=<keyboard_hooked offset>,
+; -DIMAGE_ID=<12 bytes> and -DPAYLOAD="<compressed image>".
 
         bits 16
         org 0
@@ -51,10 +66,8 @@ load_routine:
 .marked:
         mov     word [es:bx+8], 0x10
 .unmarked:
-        ; 2. a block for the full image (code, data, stack)
-        ; in upper memory when DOS has it (tested: in conventional memory the
-        ; board picture comes out wrong; the cause is not known yet). Save the
-        ; allocation strategy and UMB link, link UMBs, ask high-only (0x80).
+        ; 2. the resident image of this build, or a new block for it. Link
+        ; UMBs for the search and the allocation (saved and restored).
         mov     ax, 0x5800
         int     0x21
         mov     [cs:old_strategy], ax
@@ -64,21 +77,19 @@ load_routine:
         mov     ax, 0x5803
         mov     bx, 1
         int     0x21
+        call    find_image
+        jnc     .reuse
+        ; upper memory first, else the last fit in conventional memory: at
+        ; its top the block leaves the free memory below in one piece
         mov     ax, 0x5801
-        mov     bx, 0x80
+        mov     bx, 0x82
         int     0x21
         mov     bx, FULL_PARAS
         mov     ah, 0x48
         int     0x21
         pushf
         push    ax
-        mov     ax, 0x5801
-        mov     bx, [cs:old_strategy]
-        int     0x21
-        mov     ax, 0x5803
-        xor     bh, bh
-        mov     bl, [cs:old_link]
-        int     0x21
+        call    restore_strategy
         pop     ax
         popf
         jnc     .allocated
@@ -90,6 +101,7 @@ load_routine:
         xor     ax, ax
         jmp     .fill
 .allocated:
+        call    mark_block
         mov     es, ax
         push    cs
         pop     ds
@@ -98,6 +110,30 @@ load_routine:
         xor     di, di
         cld
         call    decompress
+        jmp     .unpacked
+.reuse:
+        push    ax
+        call    restore_strategy
+        pop     ax
+        ; keep the INT 16h hook's state across the new copy
+        mov     es, ax
+        mov     ebx, [es:OLD16]
+        mov     [cs:saved_old16], ebx
+        mov     ebx, [es:KBHOOKED]
+        mov     [cs:saved_hooked], ebx
+        push    cs
+        pop     ds
+        mov     si, payload
+        mov     bx, payload_end
+        xor     di, di
+        cld
+        call    decompress
+        mov     es, [cs:image_segment]
+        mov     ebx, [cs:saved_old16]
+        mov     [es:OLD16], ebx
+        mov     ebx, [cs:saved_hooked]
+        mov     [es:KBHOOKED], ebx
+.unpacked:
         ; 3. shrink our own block to the stub
         les     di, [bp+6]
         cmp     word [es:di+6], 0xa55a
@@ -142,6 +178,101 @@ load_routine:
         pop     ds
         pop     bp
         retf    4
+
+; Restore the allocation strategy and the UMB link saved on entry.
+restore_strategy:
+        mov     ax, 0x5801
+        mov     bx, [cs:old_strategy]
+        int     0x21
+        mov     ax, 0x5803
+        xor     bh, bh
+        mov     bl, [cs:old_link]
+        int     0x21
+        ret
+
+; Walk the MCB chain (UMBs linked) for a block owned by DOS, of FULL_PARAS
+; paragraphs, named DOSCAD, whose last paragraph starts with IMAGE_ID.
+; Returns CF clear and AX = its segment, or CF set.
+find_image:
+        push    ds
+        push    cs
+        pop     ds
+        mov     ah, 0x52
+        int     0x21
+        mov     ax, [es:bx-2]
+.walk:
+        mov     es, ax
+        mov     dl, [es:0]
+        cmp     dl, 'M'
+        je      .check
+        cmp     dl, 'Z'
+        jne     .none
+.check:
+        cmp     word [es:1], 8
+        jne     .next
+        cmp     word [es:3], FULL_PARAS
+        jne     .next
+        mov     si, mcb_name
+        mov     di, 8
+        mov     cx, 8
+        cld
+        repe    cmpsb
+        jne     .next
+        push    es
+        mov     bx, es
+        add     bx, FULL_PARAS
+        mov     es, bx
+        mov     si, image_id
+        xor     di, di
+        mov     cx, 12
+        repe    cmpsb
+        pop     es
+        jne     .next
+        mov     ax, es
+        inc     ax
+        pop     ds
+        clc
+        ret
+.next:
+        cmp     dl, 'Z'
+        je      .none
+        mov     ax, es
+        add     ax, [es:3]
+        inc     ax
+        jmp     .walk
+.none:
+        pop     ds
+        stc
+        ret
+
+; Give the block at AX to DOS (owner 8, name DOSCAD) so that it outlives the
+; program that loaded it, and write the build's identity in its last
+; paragraph (the stroke font segment after it: none yet).
+mark_block:
+        push    ds
+        push    cs
+        pop     ds
+        mov     bx, ax
+        dec     bx
+        mov     es, bx
+        mov     word [es:1], 8
+        mov     si, mcb_name
+        mov     di, 8
+        mov     cx, 8
+        cld
+        rep     movsb
+        add     bx, FULL_PARAS
+        mov     es, bx
+        mov     si, image_id
+        xor     di, di
+        mov     cx, 12
+        rep     movsb
+        xor     eax, eax
+        stosd
+        mov     ax, es
+        sub     ax, FULL_PARAS - 1
+        pop     ds
+        ret
 
 ; Decompress DS:SI..DS:BX into ES:DI (lzpack.py). Token byte t:
 ;  t < 0x40: copy t+1 literal bytes;
@@ -197,6 +328,14 @@ old_strategy:
         dw      0
 old_link:
         db      0
+saved_old16:
+        dd      0
+saved_hooked:
+        dd      0
+mcb_name:
+        db      "DOSCAD", 0, 0
+image_id:
+        db      IMAGE_ID
 
 payload:
         incbin  PAYLOAD

@@ -66,12 +66,18 @@ gcc -m16 -march=i386 $opt -ffreestanding -fno-pic -fno-pie -fno-asynchronous-unw
 (cd "$out" && ld -m elf_i386 -T "$here/link.ld" -o image.elf doscad-asm.o doscad-c.o)
 objcopy -O binary "$out/image.elf" "$out/image.bin"
 table=$(nm "$out/image.elf" | awk '$3 == "entry_table" {print "0x" $1}')
+old16=$(nm "$out/image.elf" | awk '$3 == "old16" {print "0x" $1}')
+kbhooked=$(nm "$out/image.elf" | awk '$3 == "keyboard_hooked" {print "0x" $1}')
+# The build's identity, which the stub looks for in a resident image: the first
+# 12 bytes of the image's SHA-256, as a nasm byte list.
+image_id=$(python3 -I -c 'import hashlib, sys; print(",".join("0x%02x" % b for b in hashlib.sha256(open(sys.argv[1], "rb").read()).digest()[:12]))' "$out/image.bin")
 
 # 4. PCB_RM.EXE loads the driver into a fixed 32 KB block: the stub carries the
 # image compressed and unpacks it into a block of its own (stub.asm).
 python3 -I "$here/lzpack.py" "$out/image.bin" "$out/image.lz"
 size=$(stat -c %s "$out/image.bin")
 nasm -f bin -DFULL_PARAS=$(( (size + 15) / 16 + 2 )) -DTABLE="$table" \
+    -DOLD16="$old16" -DKBHOOKED="$kbhooked" -DIMAGE_ID="$image_id" \
     -DPAYLOAD="'$out/image.lz'" -o "$out/stub.bin" "$here/stub.asm"
 
 # The version lives in one place, DOSCAD_VERSION in doscad.c.

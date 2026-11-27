@@ -48,9 +48,9 @@ integer scale and smooths the font (Scale2x / Scale3x), so the text stays readab
 At 640×480 and 800×600 the PCB386 board picture is pixel-identical to `VGA640.DRV` and
 `VESA800.DRV`; so are DRAFT's, zoomed out too, and ESP's. ESP fills the whole screen at any resolution.
 
-Package version: **1.7.0**; driver version: **1.7.0** (see the changelog at the end). The
+Package version: **1.7.1**; driver version: **1.7.1** (see the changelog at the end). The
 start screen of PCB386 shows
-`Variable resolution advanced VESA driver  v1.7.0  1920x1080 256 colours` with the mode that
+`Variable resolution advanced VESA driver  v1.7.1  1920x1080 256 colours` with the mode that
 was actually set.
 
 ### Package files
@@ -64,7 +64,7 @@ The package `doscad.drv.<version>.zip` (with its `.sha256` checksum) holds:
 | `COPYING` | The licence: GNU General Public License, version 2 (the driver is GPL-2.0-or-later). |
 | `banner.svg` | The picture at the top of this document. |
 | `build.sh` | Builds `DOSCAD.DRV` from the sources below (section 6). |
-| `stub.asm` | Loader stub, the part of the file DOS loads: unpacks the driver image into an upper memory block and hands control to it. |
+| `stub.asm` | Loader stub, the part of the file DOS loads: unpacks the driver image into a memory block that stays resident and is shared by every program (upper memory when there is room), and hands control to it. |
 | `doscad.asm` | Real-mode part of the driver image: load routine, entry table and the thunks from each PCB386 driver entry into the C code. |
 | `doscad.c` | Drawing code: the PCB386 display driver entries on a VESA 256-colour mode, the font loader, the scaling and the frame rate overlay. |
 | `link.ld` | Linker script: lays out the flat 16-bit driver image (assembly first, then the C code and data). |
@@ -99,8 +99,10 @@ when it loads, which some antivirus programs report as suspicious; the sources a
 3. Configure DOSBox-X (section 2) and, if wanted, the driver (section 3).
 4. Start PCB386 as usual. The banner must show the mode you asked for.
 
-The driver needs DOS upper memory (`umb=true`, the DOSBox-X default): it unpacks itself
-into an upper memory block. In conventional memory the board picture came out wrong.
+The driver keeps one copy of itself resident for the whole DOSBox-X session, about 69 KB
+(the driver and the stroke font), shared by ESP, DRAFT and PCB386. It goes into upper
+memory when there is room (`umb=true`, the DOSBox-X default; `MEM /C` lists it as
+`SYSTEM`), else at the top of conventional memory.
 
 ## 2. DOSBox-X configuration
 
@@ -228,7 +230,7 @@ What each setting does:
 | `core=dynamic` (or `auto`), `cycles=fixed 1000000` | Redraw speed, option 1 (recommended): the fastest and steadiest redraws, and the PC's CPU stays low while OrCAD waits. Option 2: `cycles=max` with `set doscadidle=0`, exactly as driver 1.3.0: slower redraws and one core of the PC at 100 % even at rest. Section 5. |
 | `forcerate=60` | The refresh rate of the emulated screen. DOSBox-X runs the VESA modes at 70 Hz, whatever the monitor; set the monitor's own rate (DOSBox-X cannot read it on Linux) so the pointer and the picture move at every monitor frame. |
 | `mouse report rate=500` | How often DOSBox-X passes mouse movements to the program (default 100 per second). With 500, PCB386, DRAFT and ESP follow the mouse without steps. |
-| `umb=true` | The driver runs from an upper memory block. |
+| `umb=true` | The driver stays in upper memory (about 69 KB), leaving conventional memory to the programs. |
 | `z:\dos\loadfix -64` | Programs compressed with Microsoft EXEPACK (some ESP utilities, such as some versions of `ANNOTATE`) stop with `Packed file is corrupt` when DOS loads them in the first 64 KB of memory, and DOSBox-X's small kernel leaves free memory starting there. DOSBox-X retries such a program with LOADFIX only when its own shell starts it (`autoloadfix`), not when the ESP menu does. This has nothing to do with the driver. |
 | `aspect=false`, `scaler=none` | One emulated pixel per screen pixel: no blur and no extra cost. |
 
@@ -487,11 +489,13 @@ Not set: steps 2 and 3, which find it in a standard installation.
 | `Packed file is corrupt` when an ESP utility starts | Put `z:\dos\loadfix -64` first in `[autoexec]` (section 2). |
 | ESP flashes `MSDOS Error #  6 Invalid Handle` at start; later Tools → Local Configuration says `Unable to redirect STDOUT to a file REPORT.TXT`, and DRAFT started from ESP ignores the keyboard | `EDITOR` in `ESP.CFG` names a file that does not exist (e.g. `'C:\util\ed.EXE'`). ESP's failed open of it closes the console handle by mistake, which then breaks ESP's redirection and the programs it starts. Point `EDITOR` at an editor that exists in the emulated machine, or leave it empty: `EDITOR = ''`. This is not a driver fault; it happens with `VGA640.DRV` too. |
 | The bottom line of the screen is cut off | The window is taller than the desktop: switch to full screen (Alt+Enter or the host key + F) or use a smaller `doscadvres`. |
-| Board picture garbled, menus right | The driver could not get an upper memory block: set `umb=true` and leave some UMB free. |
+| Board picture garbled, menus right | `DOSCAD.DRV` older than 1.7.1 without an upper memory block: update (or set `umb=true` and leave some UMB free). |
 | Redraws slow | Use `core=dynamic` and `cycles=fixed 1000000` (option 1 of section 5). If you keep `cycles=max`, add `set doscadidle=0` (option 2). A smaller mode or a larger scale draws faster. |
 | Mouse pointer, key repeat or the clock sluggish after setting `cycles=fixed` | The PC cannot keep up with that value: lower it (section 5). With a driver older than 1.4.0 this also happens at rest: update. |
 | Mouse pointer moves in steps | Set `[dos] mouse report rate=500` and `[video] forcerate=` your monitor's refresh rate (section 2). |
-| Back from PCB386 (or DRAFT) to ESP, the screen stays empty and ESP does not answer | ESP and the program use two DOSCAD driver files with different names (e.g. a renamed copy): use the same file in `ESP.CFG` and in the program's configuration. |
+| Back from PCB386 (or DRAFT) to ESP, the screen stays empty with the cursor at the top left and DOSBox-X does not answer, often only from the second run on | `DOSCAD.DRV` older than 1.7.1, when ESP and the program name two different driver files (another name or path, or a `.BCF` naming another file) or upper memory runs out: update. With an older driver, use the same file name in `ESP.CFG` and in the program's configuration. |
+| After changing `DD` in `PCB.CFG` or `SDT.CFG`, PCB386 or DRAFT still uses the old driver | They read `PCB.BCF` / `SDT.BCF` in preference to the `.CFG`: delete the `.BCF`, it is rebuilt from the `.CFG`. |
+| Phar Lap error 58 (cannot create the swap file) at start, after DOSBox-X was closed while a program ran | A stale `C:\SWAPFILE.TMP` is left over: delete it, or run without the virtual memory swap file (`SET DOSX=-NOVM`). Not a driver fault. |
 | Thin outlined (hollow) tracks: a diagonal stretch is one line where `VGA640.DRV` draws two parallel lines; hatched zones look sparse, not dense, when zoomed out | `DOSCAD.DRV` older than 1.6.3: update. |
 | DRAFT opens a sheet zoomed in further than with `VGA640.DRV`, or a zoomed-out sheet looks wrong (huge circles, missing arcs) | `DOSCAD.DRV` older than 1.5.0: update. |
 | ESP uses only the top-left part of the screen (at 640×480 its boxes look squashed) | `DOSCAD.DRV` older than 1.6.0: update. |
@@ -585,7 +589,7 @@ The build needs no OrCAD file: the 8×8 font is read at run time (section 3, `DO
 
 ```sh
 sh build.sh
-# DOSCAD.DRV v1.7.0: 28896 bytes; image 64384 bytes -> /path/to/DOSCAD.DRV
+# DOSCAD.DRV v1.7.1: 29456 bytes; image 64864 bytes -> /path/to/DOSCAD.DRV
 ```
 
 Overrides: `DOSCAD_OUT` (build directory, default `build/`), `DOSCAD_DRV` (the
@@ -595,8 +599,9 @@ finished driver, default `DOSCAD.DRV` next to the script).
   that writes every row and pixel to video memory (real mode, nasm).
 - `doscad.c`: the drawing code (gcc `-m16 -O2`, freestanding).
 - `link.ld`: the flat image (at most 64 KB); `lzpack.py`: its compressor; `stub.asm`: the
-  loader that unpacks it into upper memory (PCB386 loads drivers into a fixed 32 KB block,
-  so the file must stay under 32 KB). Code that runs only at start-up is marked `COLD`
+  loader that unpacks it into a resident block shared by every program, in upper memory
+  when there is room (PCB386 loads drivers into a fixed 32 KB block, so the file must stay
+  under 32 KB). Code that runs only at start-up is marked `COLD`
   (built for size), to keep the drawing code at `-O2` within both limits.
 - The version is `DOSCAD_VERSION` in `doscad.c`; `build.sh` prints it.
 
@@ -609,6 +614,23 @@ built with `-Os` to fit the 64 KB image.
 
 The version follows semantic versioning: major for a change that needs a new
 configuration, minor for a new feature, patch for a fix.
+
+### 1.7.1 — 2026-11-27
+
+- Fix: back from PCB386 or DRAFT to ESP, DOSBox-X could hang (empty screen, cursor at the
+  top left). Programs started from ESP load their own copy of the driver when their
+  configuration names another driver file than ESP's, and after the program ends ESP
+  calls that copy once more; the copy had been freed with the program, and when it was
+  in conventional memory ESP's own code was back over it. It happened from the second
+  run on, once upper memory was full, or at once without upper memory. Reported by
+  Stephen, who traced it to the program's copy of the driver in conventional memory.
+- The driver now stays resident for the whole DOSBox-X session (about 69 KB, in upper
+  memory when there is room, else at the top of conventional memory) and every program
+  shares that one copy: no more copy per run left behind in upper memory, and ESP can use
+  `DOSCAD.DRV` together with PCB386 and DRAFT whatever file names they give.
+- Without upper memory (`umb=false`) the picture is now right too.
+- Picture unchanged: pixel-identical to 1.7.0 in every tested mode, with and without
+  upper memory.
 
 ### 1.7.0 — 2026-11-25
 

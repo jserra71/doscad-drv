@@ -40,6 +40,11 @@
 //     control character uses the stroke font read from the user's VGA640.DRV
 //     with the 8x8 font (load_strokes, contributed by Michael Solis); without
 //     it the driver falls back to the 8x8 font reduced (draw_text_small).
+// 11. The image and the stroke font block stay resident for the DOS session,
+//     shared by every program (stub.asm): ESP may call the driver PCB386 or
+//     DRAFT loaded after they end. Each load unpacks a fresh image but keeps
+//     the INT 16h hook's state, so hook_keyboard() may find its own hook in
+//     the vector.
 
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -64,6 +69,7 @@ struct regs
 extern void int86(struct regs *r);
 extern void int16_hook(void);
 extern u16 old16[2];
+extern char image_end[];
 extern u16 args[32];
 extern u16 ret_ax, ret_bx, ret_cx, ret_dx, g_entry;
 
@@ -76,8 +82,10 @@ static int font_loaded;
 /// The stroke font of VGA640.DRV (its text routine at 0x1a3a): a 256-word table of glyph
 /// pointers, a 32-word table of the alternate glyphs for flag 43, then the glyphs, each a
 /// list of words ended by 0. It is 5348 bytes at 0x5280 of the user's VGA640.DRV, read
-/// into a DOS block at start-up (the block is not in the 32 KB of the driver file). The
-/// pointers keep the original's values: block offset = pointer - 0x460.
+/// into a DOS block at start-up (the image has no room left in its 64 KB). The pointers
+/// keep the original's values: block offset = pointer - 0x460. The block belongs to DOS,
+/// like the image's (stub.asm), and its segment is kept in the image block's last
+/// paragraph, so that every load of the resident image finds it again (stroke_block).
 #define STROKE_FILE_OFFSET 0x5280
 #define STROKE_SIZE 5348
 #define STROKE_BASE 0x460
@@ -296,7 +304,7 @@ enum { WRITE_REPLACE = 0, WRITE_OR = 1, WRITE_XOR = 2 };
 /// Start-up and shut-down code: built for size, so the drawing code keeps -O2 within the
 /// 64 KB image.
 #define COLD __attribute__((cold))
-#define DOSCAD_VERSION "1.7.0"
+#define DOSCAD_VERSION "1.7.1"
 
 static const u8 COLOUR_TO_VGA[16] = {0, 1, 2, 3, 4, 5, 6, 8, 7, 9, 10, 11, 12, 13, 14, 15};
 static const u8 DASH[4] = {1, 1, 0, 0};
@@ -2958,17 +2966,43 @@ COLD static int read_at(u16 handle, u32 offset, u8 *buffer, u16 count)
 }
 
 COLD static u16 dos_allocate(u16 paragraphs, u16 *largest);
+COLD static u16 dos_allocate_resident(u16 paragraphs, const char *name);
 COLD static void dos_free(u16 seg);
 
+/// Paragraphs of the stroke font block.
+#define STROKE_PARAGRAPHS ((STROKE_SIZE + 15) / 16)
+
+/// The last paragraph of the image block (stub.asm: the build's identity, then at
+/// offset 12 the segment of the stroke font block, 0 while there is none).
+static u16 identity_segment(void)
+{
+    return (u16)(code_segment() + (((u16)(u32)image_end + 15) >> 4) + 1);
+}
+
+/// Returns 1 when the MCB before seg is a resident block of ours: owner 8 (DOS) and
+/// the given number of paragraphs.
+static int resident_block(u16 seg, u16 paragraphs)
+{
+    u8 type = peek8((u16)(seg - 1), 0);
+    return (type == 'M' || type == 'Z') && peek16((u16)(seg - 1), 1) == 8 &&
+           peek16((u16)(seg - 1), 3) == paragraphs;
+}
+
 /// Reads the stroke font of the open VGA640.DRV into a DOS block (stroke_segment stays 0
-/// when it cannot: text then falls back to the small 8x8 text). Done once.
+/// when it cannot: text then falls back to the small 8x8 text). Done once per DOS
+/// session: a later load of the image takes the block it finds through the image block.
 COLD static void load_strokes(u16 handle)
 {
     if (stroke_segment) {
         return;
     }
-    u16 unused = 0;
-    u16 seg = dos_allocate((STROKE_SIZE + 15) / 16, &unused);
+    u16 id = identity_segment();
+    u16 kept = peek16(id, 12);
+    if (kept && resident_block(kept, STROKE_PARAGRAPHS)) {
+        stroke_segment = kept;
+        return;
+    }
+    u16 seg = dos_allocate_resident(STROKE_PARAGRAPHS, "DOSCADFN");
     if (seg == 0) {
         return;
     }
@@ -2983,6 +3017,7 @@ COLD static void load_strokes(u16 handle)
         }
     }
     stroke_segment = seg;
+    poke16(id, 12, seg);
 }
 
 /// Reads the font from the file named in font_path after checking that it is VGA640.DRV.
@@ -3207,6 +3242,16 @@ COLD static void hook_keyboard(void)
     g.intno = 0x21;
     g.eax = 0x3516;
     int86(&g);
+    // The vector may already be this hook: the image is resident and shared, and the ESP
+    // launcher puts back the vector ESP had (this hook) after DRAFT or PCB386 unhooked it.
+    // old16 still holds the vector the hook replaced then (kept across loads, stub.asm);
+    // taking the hook itself as old16 would make every INT 16h call recurse for ever.
+    if ((u16)g.ebx == (u16)(u32)int16_hook && g.es == code_segment()) {
+        if (old16[1] != 0 && !(old16[0] == (u16)(u32)int16_hook && old16[1] == g.es)) {
+            keyboard_hooked = 1;
+        }
+        return;
+    }
     old16[0] = (u16)g.ebx;
     old16[1] = g.es;
     struct regs s = {0};
@@ -3424,6 +3469,42 @@ COLD static u16 dos_allocate(u16 paragraphs, u16 *largest)
     return (u16)r.eax;
 }
 
+/// Allocates a block that outlives the program: in upper memory when DOS has it, else
+/// at the top of conventional memory (last fit), then gives it to DOS (MCB owner 8)
+/// under the 8-character name. Returns its segment, or 0.
+COLD static u16 dos_allocate_resident(u16 paragraphs, const char *name)
+{
+    struct regs r = {0};
+    r.intno = 0x21;
+    r.eax = 0x5800;
+    int86(&r);
+    u16 strategy = (u16)r.eax;
+    r.eax = 0x5802;
+    int86(&r);
+    u16 link = (u16)(r.eax & 0xff);
+    r.eax = 0x5803;
+    r.ebx = 1;
+    int86(&r);
+    r.eax = 0x5801;
+    r.ebx = 0x82;
+    int86(&r);
+    u16 unused = 0;
+    u16 seg = dos_allocate(paragraphs, &unused);
+    r.eax = 0x5801;
+    r.ebx = strategy;
+    int86(&r);
+    r.eax = 0x5803;
+    r.ebx = link;
+    int86(&r);
+    if (seg) {
+        poke16((u16)(seg - 1), 1, 8);
+        for (u16 i = 0; i < 8; i++) {
+            poke8((u16)(seg - 1), (u16)(8 + i), (u8)name[i]);
+        }
+    }
+    return seg;
+}
+
 COLD static void dos_free(u16 seg)
 {
     struct regs r = {0};
@@ -3438,9 +3519,7 @@ COLD static void allocate_block(void)
     if (block_allocated) {
         return;
     }
-    // A plain DOS block is enough because the stub put the driver image in
-    // upper memory (tested: with the image in conventional memory the board
-    // picture comes out wrong; why is not known yet).
+    // A plain DOS block of the calling program, freed with it.
     u16 unused = 0;
     block_segment = dos_allocate(BLOCK_PARAGRAPHS, &unused);
     block_allocated = block_segment != 0;
