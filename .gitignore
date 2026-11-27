@@ -3,6 +3,7 @@
 
 # Build output of build.sh (the finished driver and its intermediate files).
 /DOSCAD.DRV
+/PCBPATCH.COM
 /build/
 # Release packages and their checksums: published by hand, not kept in git.
 /*.zip

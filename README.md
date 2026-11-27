@@ -12,9 +12,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
 ## Download
 
 **[Download the latest package from the Releases page](https://github.com/jserra71/doscad-drv/releases/latest)**:
-`doscad.drv.<version>.zip`, with the ready-to-use `DOSCAD.DRV`, the sources and this
-document, and `doscad.drv.<version>.zip.sha256` to check it
-(`sha256sum -c doscad.drv.<version>.zip.sha256`).
+`doscad.drv.<version>.zip`, with the ready-to-use `DOSCAD.DRV`, the optional
+`PCBPATCH.COM` (section 5), the sources and this document, and
+`doscad.drv.<version>.zip.sha256` to check it (`sha256sum -c doscad.drv.<version>.zip.sha256`).
 
 GitHub's green **Code → Download ZIP** button and the *Source code* archives of each
 release hold the sources only, without `DOSCAD.DRV`: use them only to build the driver
@@ -30,11 +30,15 @@ yourself (section 6).
 >   used here only to say what this driver works with.
 > - This package contains no OrCAD software, code, fonts or other data. The driver reads
 >   the font from the user's own copy of `VGA640.DRV` at run time and never copies or
->   distributes it.
+>   distributes it. `PCBPATCH.COM` holds no byte of OrCAD's programs either: it recognises
+>   the routine it changes by a checksum and takes the bytes for an undo from your own
+>   backup.
 > - Running OrCAD with this driver requires a copy of OrCAD that you are licensed to use.
 >   This package grants no rights to any OrCAD software.
 > - The driver exists so that the OrCAD 386+ programs can keep working on today's emulated hardware
->   (interoperability). It does not change, patch or include the original programs.
+>   (interoperability). It does not change, patch or include the original programs. The
+>   optional `PCBPATCH.COM` changes 11 bytes of your own copy of `PCB386.EXE`, only when you
+>   run it, keeps the original as `PCB386.ORG`, and can undo the change (section 5).
 > - It is provided "as is", without any warranty (see the licence at the end). Use it at
 >   your own risk.
 
@@ -48,7 +52,7 @@ integer scale and smooths the font (Scale2x / Scale3x), so the text stays readab
 At 640×480 and 800×600 the PCB386 board picture is pixel-identical to `VGA640.DRV` and
 `VESA800.DRV`; so are DRAFT's, zoomed out too, and ESP's. ESP fills the whole screen at any resolution.
 
-Package version: **1.7.1**; driver version: **1.7.1** (see the changelog at the end). The
+Package version: **1.8.0**; driver version: **1.7.1** (see the changelog at the end). The
 start screen of PCB386 shows
 `Variable resolution advanced VESA driver  v1.7.1  1920x1080 256 colours` with the mode that
 was actually set.
@@ -60,6 +64,7 @@ The package `doscad.drv.<version>.zip` (with its `.sha256` checksum) holds:
 | File | What it is |
 | --- | --- |
 | `DOSCAD.DRV` | The driver, ready to use: the only file you need to install (section 1). |
+| `PCBPATCH.COM` | Optional: makes PCB386 start several seconds sooner, by changing your own copy of `PCB386.EXE` v2.22H (section 5, "Faster PCB386 start"). Not needed by the driver. |
 | `README.md` | This document. |
 | `COPYING` | The licence: GNU General Public License, version 2 (the driver is GPL-2.0-or-later). |
 | `banner.svg` | The picture at the top of this document. |
@@ -69,6 +74,7 @@ The package `doscad.drv.<version>.zip` (with its `.sha256` checksum) holds:
 | `doscad.c` | Drawing code: the PCB386 display driver entries on a VESA 256-colour mode, the font loader, the scaling and the frame rate overlay. |
 | `link.ld` | Linker script: lays out the flat 16-bit driver image (assembly first, then the C code and data). |
 | `lzpack.py` | Compresses the driver image so that `DOSCAD.DRV` stays small; `stub.asm` unpacks it. |
+| `pcbpatch.asm` | Source of `PCBPATCH.COM` (nasm). |
 
 The sources are only needed to rebuild the driver. `DOSCAD.DRV` unpacks itself in memory
 when it loads, which some antivirus programs report as suspicious; the sources and
@@ -106,7 +112,7 @@ memory when there is room (`umb=true`, the DOSBox-X default; `MEM /C` lists it a
 
 ## 2. DOSBox-X configuration
 
-Tested with DOSBox-X 2026.01.02. The example below is a complete `dosbox-x.conf` for
+Tested with DOSBox-X 2026.10.01 and 2026.01.02. The example below is a complete `dosbox-x.conf` for
 the OrCAD suite; DOSBox-X takes its defaults for every setting it does not list. It
 assumes these Linux folders:
 
@@ -490,6 +496,7 @@ Not set: steps 2 and 3, which find it in a standard installation.
 | ESP flashes `MSDOS Error #  6 Invalid Handle` at start; later Tools → Local Configuration says `Unable to redirect STDOUT to a file REPORT.TXT`, and DRAFT started from ESP ignores the keyboard | `EDITOR` in `ESP.CFG` names a file that does not exist (e.g. `'C:\util\ed.EXE'`). ESP's failed open of it closes the console handle by mistake, which then breaks ESP's redirection and the programs it starts. Point `EDITOR` at an editor that exists in the emulated machine, or leave it empty: `EDITOR = ''`. This is not a driver fault; it happens with `VGA640.DRV` too. |
 | The bottom line of the screen is cut off | The window is taller than the desktop: switch to full screen (Alt+Enter or the host key + F) or use a smaller `doscadvres`. |
 | Board picture garbled, menus right | `DOSCAD.DRV` older than 1.7.1 without an upper memory block: update (or set `umb=true` and leave some UMB free). |
+| PCB386 takes several seconds before its screen appears (about 8 s at `cycles=fixed 1000000`, more on a slow PC), while DRAFT starts at once | PCB386's own start-up timing calibration, not the driver (`VGA640.DRV` is as slow): run `PCBPATCH.COM` once (section 5, "Faster PCB386 start"). |
 | Redraws slow | Use `core=dynamic` and `cycles=fixed 1000000` (option 1 of section 5). If you keep `cycles=max`, add `set doscadidle=0` (option 2). A smaller mode or a larger scale draws faster. |
 | Mouse pointer, key repeat or the clock sluggish after setting `cycles=fixed` | The PC cannot keep up with that value: lower it (section 5). With a driver older than 1.4.0 this also happens at rest: update. |
 | Mouse pointer moves in steps | Set `[dos] mouse report rate=500` and `[video] forcerate=` your monitor's refresh rate (section 2). |
@@ -574,6 +581,46 @@ same mode DOSCAD.DRV was already faster than the original drivers (1.2.0, `cycle
 640×480: 101 / 80 ms, `VGA640.DRV` 128 / 95 ms). A smaller mode or a larger scale draws
 faster, since less of the board is visible.
 
+### Faster PCB386 start: `PCBPATCH.COM` (optional)
+
+Every time PCB386 starts, before it even reads `PCB.CFG`, its C runtime calibrates the
+`delay()` function: it asks DOS for the time until the second changes, then counts how
+many times it can ask during one more second. That is 1–2 s of emulated time, and in
+DOSBox-X each question is a switch from the DOS extender's protected mode to real mode and
+back, which is slow to emulate: at `cycles=fixed 1000000` the PC needs about 4 s for each
+emulated second there, so PCB386 takes about 8 s to start (more on a slow PC). With
+`cycles=max` the emulated time keeps up with the clock, and the start takes 3–5 s. It
+happens with every driver, `VGA640.DRV` too. PCB386 uses `delay()` only for the length of
+its 30 ms beep; DRAFT has no such calibration.
+
+`PCBPATCH.COM` makes PCB386 skip the calibration: it replaces the start of that routine
+with a fixed count (11 bytes) in your own `PCB386.EXE`. Nothing else changes: the board
+pictures are pixel-identical (the only difference is where the "Working" spinner on the
+bottom line stops, since loading takes less time), and the beep keeps about its length.
+
+Time until PCB386 shows the test board, 1920×1080, from the DOS prompt (one PC):
+
+| `cycles` | `PCB386.EXE` as shipped | patched |
+| --- | --- | --- |
+| `fixed 1000000` | 7.7 s | 0.7 s |
+| `max` | 3.6 s | 1.7 s |
+| `fixed 300000` | 2.8 s | 1.0 s |
+
+Run it once inside DOSBox-X, in the folder of `PCB386.EXE` or with `ORCADEXE` set:
+
+```
+C:\ORCADEXE> PCBPATCH
+PCB386.EXE patched: the delay() calibration is skipped.
+Original kept as PCB386.ORG
+```
+
+- `PCBPATCH [file]` patches another copy; `PCBPATCH /U` undoes the patch (it takes the
+  original bytes from `PCB386.ORG`).
+- It only changes `PCB386.EXE` v2.22H (17-MAY-96, 1 411 076 bytes) whose routine is
+  exactly the expected one; any other file is left untouched. Running it twice changes
+  nothing.
+- It copies the file to `PCB386.ORG` first (an existing `PCB386.ORG` is kept).
+
 ## 6. Build
 
 On Linux (x86), with:
@@ -590,10 +637,11 @@ The build needs no OrCAD file: the 8×8 font is read at run time (section 3, `DO
 ```sh
 sh build.sh
 # DOSCAD.DRV v1.7.1: 29456 bytes; image 64864 bytes -> /path/to/DOSCAD.DRV
+# PCBPATCH.COM: 1524 bytes -> /path/to/PCBPATCH.COM
 ```
 
 Overrides: `DOSCAD_OUT` (build directory, default `build/`), `DOSCAD_DRV` (the
-finished driver, default `DOSCAD.DRV` next to the script).
+finished driver, default `DOSCAD.DRV` next to the script; `PCBPATCH.COM` goes next to it).
 
 - `doscad.asm`: the load routine, the entry table and the entry thunk, and the span kernel
   that writes every row and pixel to video memory (real mode, nasm).
@@ -614,6 +662,17 @@ built with `-Os` to fit the 64 KB image.
 
 The version follows semantic versioning: major for a change that needs a new
 configuration, minor for a new feature, patch for a fix.
+
+### 1.8.0 — 2026-11-27
+
+Package only; the driver stays 1.7.1.
+
+- New, optional: `PCBPATCH.COM` makes PCB386 start several seconds sooner (at
+  `cycles=fixed 1000000` about 0.7 s instead of 7.7 s; section 5, "Faster PCB386 start").
+  The wait was PCB386's own start-up calibration of `delay()`, the same with every driver.
+  It changes 11 bytes of your own `PCB386.EXE` v2.22H, keeps the original as `PCB386.ORG`
+  and can undo the change (`PCBPATCH /U`).
+- Tested with DOSBox-X 2026.10.01 as well as 2026.01.02: no difference.
 
 ### 1.7.1 — 2026-11-27
 

@@ -10,12 +10,14 @@
 #  3. Links the flat image at offset 0 (the driver itself).
 #  4. Compresses it (lzpack.py) and assembles the loader stub around it.
 #  5. Prepends a 32-byte MZ header to the stub.
+#  6. Assembles PCBPATCH.COM (pcbpatch.asm), the optional PCB386 start-up patch,
+#     next to the driver.
 # The 8x8 font is OrCAD's and is not part of the build: the driver reads it from
 # the user's VGA640.DRV when it starts (doscad.c, load_font).
 #
 # Usage: sh build.sh
 # Environment overrides: DOSCAD_OUT (build directory), DOSCAD_DRV (the finished
-# driver), DOSCAD_CFLAGS (extra gcc flags).
+# driver; PCBPATCH.COM goes into its directory), DOSCAD_CFLAGS (extra gcc flags).
 set -eu
 
 # 1. Every missing tool is named at once, so one install fixes them all.
@@ -97,3 +99,8 @@ header += b"\0" * (32 - len(header))
 open(sys.argv[2], "wb").write(header + stub)
 print("DOSCAD.DRV v%s: %d bytes; image %s bytes -> %s" % (sys.argv[4], total, sys.argv[3], sys.argv[2]))
 EOF
+
+# 6. The PCB386 start-up patch program: a plain .COM file.
+patcher="$(dirname "$drv")/PCBPATCH.COM"
+nasm -f bin -o "$patcher" "$here/pcbpatch.asm"
+echo "PCBPATCH.COM: $(stat -c %s "$patcher") bytes -> $patcher"
