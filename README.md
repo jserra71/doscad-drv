@@ -52,9 +52,9 @@ integer scale and smooths the font (Scale2x / Scale3x), so the text stays readab
 At 640×480 and 800×600 the PCB386 board picture is pixel-identical to `VGA640.DRV` and
 `VESA800.DRV`; so are DRAFT's, zoomed out too, and ESP's. ESP fills the whole screen at any resolution.
 
-Package version: **1.8.0**; driver version: **1.7.1** (see the changelog at the end). The
-start screen of PCB386 shows
-`Variable resolution advanced VESA driver  v1.7.1  1920x1080 256 colours` with the mode that
+Package and driver version: **1.8.1** (see the changelog at the end; since 1.8.1 the driver
+follows the package version). The start screen of PCB386 shows
+`Variable resolution advanced VESA driver  v1.8.1  1920x1080 256 colours` with the mode that
 was actually set.
 
 ### Package files
@@ -636,7 +636,7 @@ The build needs no OrCAD file: the 8×8 font is read at run time (section 3, `DO
 
 ```sh
 sh build.sh
-# DOSCAD.DRV v1.7.1: 29456 bytes; image 64864 bytes -> /path/to/DOSCAD.DRV
+# DOSCAD.DRV v1.8.1: 29456 bytes; image 64864 bytes -> /path/to/DOSCAD.DRV
 # PCBPATCH.COM: 1524 bytes -> /path/to/PCBPATCH.COM
 ```
 
@@ -662,6 +662,18 @@ built with `-Os` to fit the 64 KB image.
 
 The version follows semantic versioning: major for a change that needs a new
 configuration, minor for a new feature, patch for a fix.
+
+### 1.8.1 — 2026-11-27
+
+- Fix: driver entry 4 (it returns a pointer to the driver's buffer) removed 2 bytes too
+  many from the caller's stack on return (`retf 2`, where `VGA640.DRV` has a plain `retf`),
+  so the program could then read wrong values from its stack. Every earlier version had
+  it. Reported and diagnosed by Michael: in DRAFT, adding a net to a sheet symbol (Edit,
+  Edit, Add-Net) moved the sheet off the screen for good, and with this fix it stays.
+  He compared the return of all 52 entries with `VGA640.DRV`: entry 4 was the only one
+  that differed.
+- The driver version now follows the package version (driver 1.7.1 → 1.8.1).
+- Picture unchanged: pixel-identical to 1.7.1 in every tested mode.
 
 ### 1.8.0 — 2026-11-27
 

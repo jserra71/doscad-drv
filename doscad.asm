@@ -99,7 +99,9 @@ load_routine:
         pop     bp
         retf    4
 
-; One stub per entry: N = entry number, B = argument bytes popped by retf.
+; One stub per entry: N = entry number, B = argument bytes popped by retf, the same
+; as the original drivers' retf of that entry (all 52 checked against VGA640.DRV;
+; entry 4 takes none: up to 1.7.1 it popped 2, which unbalanced the caller's stack).
 ; The stubs are all STUB_SIZE bytes, in entry order, so entry_common finds the
 ; return half of stub N at e0 + N * STUB_SIZE + STUB_RETURN. `strict` keeps the
 ; jump at 3 bytes: nasm would shorten it for the stubs near entry_common.
@@ -121,7 +123,7 @@ STUB_RETURN     equ 10
         ENTRY 1, 0
         ENTRY 2, 0xa
         ENTRY 3, 0
-        ENTRY 4, 2
+        ENTRY 4, 0
         ENTRY 5, 0
         ENTRY 6, 8
         ENTRY 7, 0

@@ -304,7 +304,7 @@ enum { WRITE_REPLACE = 0, WRITE_OR = 1, WRITE_XOR = 2 };
 /// Start-up and shut-down code: built for size, so the drawing code keeps -O2 within the
 /// 64 KB image.
 #define COLD __attribute__((cold))
-#define DOSCAD_VERSION "1.7.1"
+#define DOSCAD_VERSION "1.8.1"
 
 static const u8 COLOUR_TO_VGA[16] = {0, 1, 2, 3, 4, 5, 6, 8, 7, 9, 10, 11, 12, 13, 14, 15};
 static const u8 DASH[4] = {1, 1, 0, 0};
